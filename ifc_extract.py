@@ -29,11 +29,27 @@ import requests
 import numpy as np
 
 import ifcopenshell
-from ifcopenshell.util.element import get_psets, get_material
+from ifcopenshell.util.element import get_psets, get_material, get_type
 from ifcopenshell.util.placement import get_local_placement
 
 
 LOG = logging.getLogger("ifc_extract")
+
+PROFILE_PARAM_KEYS = (
+    # common parameterized profiles
+    "XDim",
+    "YDim",
+    "Radius",
+    "SemiAxis1",
+    "SemiAxis2",
+    # steel shapes, etc.
+    "OverallWidth",
+    "OverallDepth",
+    "WebThickness",
+    "FlangeThickness",
+    "FilletRadius",
+    "EdgeRadius",
+)
 
 
 # --------------------------- IO ---------------------------
@@ -69,10 +85,204 @@ def safe_str(x: Any) -> Optional[str]:
     return None if x is None else str(x)
 
 
+def safe_getattr(obj: Any, name: str, default: Any = None) -> Any:
+    """
+    ifcopenshell entity_instance.__getattr__ can raise RuntimeError for some optional
+    attributes in certain exports. Treat such cases as "missing" instead of crashing.
+    """
+    try:
+        return getattr(obj, name)
+    except Exception:
+        return default
+
+
+def extract_model_units(model) -> Dict[str, Any]:
+    """
+    Best-effort extraction of model length units.
+    Returns a dict with scale factors useful for downstream conversion.
+    """
+    out: Dict[str, Any] = {
+        "length_unit": None,
+        "length_prefix": None,
+        "length_scale_to_m": 1.0,
+        "length_scale_to_mm": 1000.0,
+    }
+    try:
+        projs = model.by_type("IfcProject") or []
+        if not projs:
+            return out
+        units = getattr(projs[0], "UnitsInContext", None)
+        unit_assign = getattr(units, "Units", None) if units else None
+        if not unit_assign:
+            return out
+        for u in unit_assign:
+            if not u or not hasattr(u, "is_a"):
+                continue
+            if u.is_a("IfcSIUnit") and getattr(u, "UnitType", None) == "LENGTHUNIT":
+                name = getattr(u, "Name", None)
+                prefix = getattr(u, "Prefix", None)  # e.g. MILLI
+                out["length_unit"] = safe_str(name)
+                out["length_prefix"] = safe_str(prefix)
+                # IFC SI unit is always METRE with optional prefix for LENGTHUNIT
+                scale_to_m = 1.0
+                if prefix:
+                    p = str(prefix).upper()
+                    scale_to_m = {
+                        "MILLI": 1e-3,
+                        "CENTI": 1e-2,
+                        "DECI": 1e-1,
+                        "KILO": 1e3,
+                        "MICRO": 1e-6,
+                    }.get(p, 1.0)
+                out["length_scale_to_m"] = float(scale_to_m)
+                out["length_scale_to_mm"] = float(scale_to_m * 1000.0)
+                break
+    except Exception as e:
+        LOG.debug("Units extract failed: %s", e)
+    return out
+
+
+def _coords_bbox_2d(coords: List[List[float]]) -> Optional[Dict[str, Any]]:
+    if not coords:
+        return None
+    xs = [c[0] for c in coords if len(c) >= 2]
+    ys = [c[1] for c in coords if len(c) >= 2]
+    if not xs or not ys:
+        return None
+    xmin, xmax = min(xs), max(xs)
+    ymin, ymax = min(ys), max(ys)
+    return {"min": [xmin, ymin], "max": [xmax, ymax], "size": [xmax - xmin, ymax - ymin]}
+
+
+def _curve_coords_2d(curve) -> Optional[List[List[float]]]:
+    """
+    Extract 2D coordinates from the most common curve types used in profile defs.
+    We only need bounding box for downstream mapping (e.g., approximate b/h).
+    """
+    try:
+        if curve is None:
+            return None
+        t = curve.is_a()
+        if t == "IfcPolyline":
+            coords = []
+            for p in getattr(curve, "Points", None) or []:
+                c = getattr(p, "Coordinates", None) or []
+                if len(c) >= 2:
+                    coords.append([float(c[0]), float(c[1])])
+            return coords or None
+        if t == "IfcIndexedPolyCurve":
+            pts = getattr(curve, "Points", None)
+            # Points is typically IfcCartesianPointList2D with CoordList
+            cl = getattr(pts, "CoordList", None) if pts else None
+            if cl:
+                coords = [[float(x), float(y)] for (x, y, *_) in cl]
+                return coords or None
+        return None
+    except Exception:
+        return None
+
+
+def profile_record(profile, units: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if profile is None or not hasattr(profile, "is_a"):
+        return None
+    out: Dict[str, Any] = {
+        "ifc_class": profile.is_a(),
+        "profile_name": safe_str(getattr(profile, "ProfileName", None)),
+        "profile_type": safe_str(getattr(profile, "ProfileType", None)),
+    }
+    # parameters (if parameterized)
+    for k in PROFILE_PARAM_KEYS:
+        if hasattr(profile, k):
+            try:
+                out[k] = float(getattr(profile, k))
+            except Exception:
+                out[k] = safe_str(getattr(profile, k))
+
+    # bbox for arbitrary profiles (or anything where we can read points)
+    outer = getattr(profile, "OuterCurve", None)
+    if outer is not None and hasattr(outer, "is_a"):
+        out["outer_curve_class"] = outer.is_a()
+        coords = _curve_coords_2d(outer)
+        bbox2d = _coords_bbox_2d(coords) if coords else None
+        if bbox2d:
+            out["bbox2d"] = bbox2d
+            # Convenience: approximate width/height in model units and in mm
+            sx, sy = bbox2d["size"]
+            out["approx_width"] = float(sx)
+            out["approx_height"] = float(sy)
+            scale_to_mm = float(units.get("length_scale_to_mm", 1000.0))
+            out["approx_width_mm"] = float(sx * scale_to_mm)
+            out["approx_height_mm"] = float(sy * scale_to_mm)
+    return out
+
+
+def extract_section_from_representation(el, units: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Try to get cross-section profile + extrusion depth from geometric representation.
+    Works well for IfcExtrudedAreaSolid-based elements.
+    """
+    try:
+        rep = getattr(el, "Representation", None)
+        if not rep:
+            return None
+        reps = getattr(rep, "Representations", None) or []
+        for r in reps:
+            items = getattr(r, "Items", None) or []
+            for it in items:
+                if not it or not hasattr(it, "is_a"):
+                    continue
+                t = it.is_a()
+                if t == "IfcExtrudedAreaSolid":
+                    prof = profile_record(getattr(it, "SweptArea", None), units)
+                    depth = getattr(it, "Depth", None)
+                    sec: Dict[str, Any] = {"solid_class": t, "profile": prof}
+                    if depth is not None:
+                        sec["extrusion_depth"] = float(depth)
+                        sec["extrusion_depth_mm"] = float(depth * float(units.get("length_scale_to_mm", 1000.0)))
+                    return sec
+                if t == "IfcSweptAreaSolid":
+                    prof = profile_record(getattr(it, "SweptArea", None), units)
+                    return {"solid_class": t, "profile": prof}
+        return None
+    except Exception as e:
+        LOG.debug("Section-from-repr failed for %s: %s", getattr(el, "GlobalId", "?"), e)
+        return None
+
+
+def extract_material_profile(el, units: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Try to extract profile from material associations (IfcMaterialProfileSetUsage etc.).
+    Some IFC exports store section/profile here rather than in geometry.
+    """
+    try:
+        mat = get_material(el, should_inherit=True)
+        if mat is None or not hasattr(mat, "is_a"):
+            return None
+        t = mat.is_a()
+        if t == "IfcMaterialProfileSetUsage":
+            mps = getattr(mat, "ForProfileSet", None)
+            t = mps.is_a() if mps else t
+            profiles = getattr(mps, "MaterialProfiles", None) if mps else None
+            if profiles:
+                mp = profiles[0]
+                prof = profile_record(getattr(mp, "Profile", None), units)
+                return {"material_class": "IfcMaterialProfileSetUsage", "profile": prof}
+        if t == "IfcMaterialProfileSet":
+            profiles = getattr(mat, "MaterialProfiles", None) or []
+            if profiles:
+                mp = profiles[0]
+                prof = profile_record(getattr(mp, "Profile", None), units)
+                return {"material_class": "IfcMaterialProfileSet", "profile": prof}
+        return None
+    except Exception as e:
+        LOG.debug("Material profile extract failed for %s: %s", getattr(el, "GlobalId", "?"), e)
+        return None
+
+
 def extract_placement_xyz(el) -> Optional[Dict[str, Any]]:
     """Get element placement as matrix + xyz (world)."""
     try:
-        if not getattr(el, "ObjectPlacement", None):
+        if not safe_getattr(el, "ObjectPlacement", None):
             return None
         m = get_local_placement(el.ObjectPlacement)  # 4x4 matrix (nested list or numpy array)
         # Convert numpy arrays to lists for JSON serialization
@@ -101,7 +311,7 @@ def extract_materials(el) -> List[str]:
         # get_material may return IfcMaterial, IfcMaterialLayerSet, IfcMaterialProfileSet, etc.
         t = mat.is_a()
         if t == "IfcMaterial":
-            if getattr(mat, "Name", None):
+            if safe_getattr(mat, "Name", None):
                 mats.append(str(mat.Name))
         else:
             # Walk common containers
@@ -111,7 +321,7 @@ def extract_materials(el) -> List[str]:
                     for it in items:
                         # layers: it.Material, profiles: it.Material
                         m = getattr(it, "Material", None) or it
-                        name = getattr(m, "Name", None)
+                        name = safe_getattr(m, "Name", None)
                         if name:
                             mats.append(str(name))
         # unique while keeping order
@@ -180,16 +390,28 @@ def extract_geometry_bbox(model, el) -> Optional[Dict[str, Any]]:
 
 
 def element_record(model, el, geom: bool, include_qto: bool) -> Dict[str, Any]:
+    units = extract_model_units(model)
+    typ = None
+    try:
+        typ = get_type(el)
+    except Exception:
+        typ = None
     rec: Dict[str, Any] = {
-        "global_id": safe_str(getattr(el, "GlobalId", None)),
+        "global_id": safe_str(safe_getattr(el, "GlobalId", None)),
         "ifc_class": el.is_a(),
-        "name": safe_str(getattr(el, "Name", None)),
-        "tag": safe_str(getattr(el, "Tag", None)),
-        "predefined_type": safe_str(getattr(el, "PredefinedType", None)),
+        "name": safe_str(safe_getattr(el, "Name", None)),
+        "tag": safe_str(safe_getattr(el, "Tag", None)),
+        "predefined_type": safe_str(safe_getattr(el, "PredefinedType", None)),
+        "type_name": safe_str(getattr(typ, "Name", None)) if typ else None,
+        "type_global_id": safe_str(getattr(typ, "GlobalId", None)) if typ else None,
         "placement": extract_placement_xyz(el),
         "materials": extract_materials(el),
         "psets": extract_psets(el, include_qto=include_qto),
+        "model_units": units,
     }
+
+    # section / profile: prefer material profile set, else representation
+    rec["section"] = extract_material_profile(el, units) or extract_section_from_representation(el, units)
 
     if geom:
         rec["bbox"] = extract_geometry_bbox(model, el)
