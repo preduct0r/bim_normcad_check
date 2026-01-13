@@ -26,6 +26,7 @@ import tempfile
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
+import numpy as np
 
 import ifcopenshell
 from ifcopenshell.util.element import get_psets, get_material
@@ -73,7 +74,13 @@ def extract_placement_xyz(el) -> Optional[Dict[str, Any]]:
     try:
         if not getattr(el, "ObjectPlacement", None):
             return None
-        m = get_local_placement(el.ObjectPlacement)  # 4x4 matrix (nested list)
+        m = get_local_placement(el.ObjectPlacement)  # 4x4 matrix (nested list or numpy array)
+        # Convert numpy arrays to lists for JSON serialization
+        if isinstance(m, np.ndarray):
+            m = m.tolist()
+        elif isinstance(m, (list, tuple)) and len(m) > 0:
+            # Handle nested numpy arrays
+            m = [[float(x) if isinstance(x, (np.integer, np.floating)) else float(x) for x in row] if isinstance(row, (list, tuple, np.ndarray)) else row for row in m]
         return {
             "matrix_4x4": m,
             "xyz": [float(m[0][3]), float(m[1][3]), float(m[2][3])]
@@ -207,6 +214,23 @@ def iter_elements(model, classes: Optional[List[str]]) -> Iterable[Any]:
 
 # --------------------------- Output ---------------------------
 
+def json_serialize(obj: Any) -> Any:
+    """Convert numpy types and other non-serializable objects to JSON-compatible types."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.integer, np.intc, np.intp, np.int8, np.int16, np.int32, np.int64)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float16, np.float32, np.float64)):
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, dict):
+        return {key: json_serialize(value) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [json_serialize(item) for item in obj]
+    return obj
+
+
 def pretty_print(rec: Dict[str, Any]) -> None:
     gid = rec.get("global_id")
     cls = rec.get("ifc_class")
@@ -276,7 +300,9 @@ def main() -> int:
                     continue
 
             if out_f:
-                out_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                # Serialize numpy arrays and other non-JSON types
+                rec_serialized = json_serialize(rec)
+                out_f.write(json.dumps(rec_serialized, ensure_ascii=False) + "\n")
             else:
                 pretty_print(rec)
 

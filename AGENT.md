@@ -1,0 +1,1 @@
+always use virtual environment E:\venvs\normcad312 for python enterpreteur
