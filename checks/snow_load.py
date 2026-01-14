@@ -1,31 +1,64 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Расчёт снеговой нагрузки по СП 20.13330.2016 (Нагрузки и воздействия).
+Расчёт снеговой нагрузки через API NormCAD.
 
-Модуль вычисляет снеговую нагрузку с учётом:
-- Снегового района (Sg)
-- Коэффициента mu (учёт неравномерности распределения снега)
-- Коэффициентов надёжности по нагрузке
+Использует NCAPI.dll для выполнения расчётов по СП 20.13330.2016.
+Модуль "Нагрузки и воздействия" -> Снеговая нагрузка.
 
-ВАЖНО: Следующие параметры НЕ извлекаются из IFC и заданы по умолчанию:
-- snow_region: снеговой район (по умолчанию III)
-- roof_angle: угол наклона кровли (по умолчанию 0deg)
-- roof_type: тип кровли для определения mu (по умолчанию 'flat')
-- Ce: коэффициент, учитывающий снос снега с покрытий (по умолчанию 1.0)
-- Ct: термический коэффициент (по умолчанию 1.0)
+Согласно документации API NormCAD:
+- Создаётся объект ncApi.Report
+- Задаются Norm, TaskName, Unit
+- Передаются данные через SetVars, SetConds
+- Запускается ClcCalc()
+- Результат получается через MaxResult
 """
 
 from __future__ import annotations
 import json
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+
+# Для работы с COM объектами NormCAD
+try:
+    import win32com.client
+    HAS_WIN32COM = True
+except ImportError:
+    HAS_WIN32COM = False
+    print("ВНИМАНИЕ: win32com не установлен. Установите: pip install pywin32")
 
 
-# ============== НОРМАТИВНЫЕ ДАННЫЕ ПО СП 20.13330.2016 ==============
+@dataclass
+class SnowLoadInput:
+    """
+    Входные данные для расчёта снеговой нагрузки.
+    
+    Данные из IFC:
+    - element_id, element_name: идентификация элемента
+    - area_m2: площадь покрытия (из Qto)
+    
+    Данные НЕ из IFC (по умолчанию):
+    - snow_region: снеговой район (I-VIII)
+    - roof_angle_deg: угол наклона кровли
+    - mu: коэффициент перехода (неравномерность)
+    - Ce: коэффициент сноса снега
+    - Ct: термический коэффициент
+    """
+    # Из IFC
+    element_id: str = ""
+    element_name: str = ""
+    area_m2: float = 0.0
+    
+    # НЕ из IFC - значения по умолчанию
+    snow_region: str = "III"
+    roof_angle_deg: float = 0.0
+    mu: float = 1.0
+    Ce: float = 1.0
+    Ct: float = 1.0
 
-# Таблица 10.1 - Вес снегового покрова Sg (кПа) по снеговым районам
+
+# Таблица 10.1 СП 20 - Вес снегового покрова Sg (кПа) по районам
 SNOW_REGIONS_SG = {
     "I": 0.5,
     "II": 1.0,
@@ -37,244 +70,197 @@ SNOW_REGIONS_SG = {
     "VIII": 4.0,
 }
 
-# Коэффициент надёжности по снеговой нагрузке (п. 10.12)
-GAMMA_F_SNOW = 1.4  # для расчёта по предельным состояниям первой группы
 
-
-@dataclass
-class SnowLoadParams:
-    """Параметры для расчёта снеговой нагрузки."""
-    
-    # Извлекаемые из IFC (через psets или геометрию)
-    element_id: str = ""
-    element_name: str = ""
-    area_m2: float = 0.0  # Площадь покрытия (из Qto или геометрии)
-    
-    # НЕ извлекаются из IFC - значения по умолчанию
-    snow_region: str = "III"  # Снеговой район (I-VIII)
-    roof_angle_deg: float = 0.0  # Угол наклона кровли, градусы
-    roof_type: str = "flat"  # Тип кровли: 'flat', 'single_slope', 'gable', 'arch'
-    Ce: float = 1.0  # Коэффициент сноса снега ветром
-    Ct: float = 1.0  # Термический коэффициент
-    
-    # Для учёта неравномерности (Приложение Б)
-    parapet_height_m: float = 0.0  # Высота парапета
-    adjacent_roof: bool = False  # Наличие перепада высот
-    height_difference_m: float = 0.0  # Перепад высот
-
-
-@dataclass
-class SnowLoadResult:
-    """Результаты расчёта снеговой нагрузки."""
-    
-    element_id: str
-    element_name: str
-    
-    # Нормативные значения
-    Sg: float  # Вес снегового покрова по району, кПа
-    mu: float  # Коэффициент перехода (учёт неравномерности)
-    Ce: float  # Коэффициент сноса
-    Ct: float  # Термический коэффициент
-    
-    # Расчётные нагрузки
-    S0: float  # Нормативное значение снеговой нагрузки, кПа
-    S: float   # Расчётное значение снеговой нагрузки, кПа
-    gamma_f: float  # Коэффициент надёжности
-    
-    # Полная нагрузка на элемент
-    area_m2: float  # Площадь
-    total_load_kN: float  # Полная нагрузка, кН
-    
-    # Примечания
-    notes: List[str] = field(default_factory=list)
-
-
-def calculate_mu(params: SnowLoadParams) -> tuple[float, List[str]]:
+def extract_from_ifc_element(element: Dict[str, Any]) -> Optional[SnowLoadInput]:
     """
-    Определение коэффициента mu по СП 20 (Приложение Б).
+    Извлечение данных из элемента IFC для расчёта снеговой нагрузки.
     
-    Возвращает (mu, notes) - коэффициент и примечания о его определении.
+    Ищем элементы кровли (IfcSlab с типом ROOF или IfcRoof).
     """
-    notes = []
-    alpha = params.roof_angle_deg
+    ifc_class = element.get("ifc_class", "")
+    predefined_type = element.get("predefined_type", "")
+    name = element.get("name", "")
     
-    # Таблица Б.1 - Коэффициент mu для покрытий без перепада высот
-    if params.roof_type == "flat":
-        # Плоская кровля (alpha <= 25deg)
-        if alpha <= 25:
-            mu = 1.0
-            notes.append(f"Плоская кровля (alpha={alpha}deg <= 25deg): mu=1.0 по табл. Б.1")
-        elif alpha <= 60:
-            # Линейная интерполяция mu = (60 - alpha) / 35
-            mu = (60 - alpha) / 35
-            notes.append(f"Скатная кровля (25deg < alpha={alpha}deg <= 60deg): mu={(60-alpha)/35:.2f}")
-        else:
-            mu = 0.0
-            notes.append(f"Крутая кровля (alpha={alpha}deg > 60deg): mu=0 (снег не задерживается)")
+    # Фильтруем только элементы кровли
+    is_roof = (
+        ifc_class == "IfcRoof" or
+        predefined_type == "ROOF" or
+        "roof" in name.lower() or
+        "кровля" in name.lower()
+    )
     
-    elif params.roof_type == "single_slope":
-        # Односкатное покрытие
-        if alpha <= 30:
-            mu = 1.0
-        elif alpha <= 60:
-            mu = (60 - alpha) / 30
-        else:
-            mu = 0.0
-        notes.append(f"Односкатное покрытие: mu={mu:.2f}")
+    if not is_roof and ifc_class != "IfcSlab":
+        return None
     
-    elif params.roof_type == "gable":
-        # Двускатное покрытие (возможна неравномерность)
-        if alpha <= 30:
-            mu = 1.0  # Равномерная нагрузка
-            notes.append(f"Двускатное покрытие (alpha={alpha}deg <= 30deg): равномерная нагрузка, mu=1.0")
-        else:
-            mu = (60 - alpha) / 30 if alpha <= 60 else 0.0
-            notes.append(f"Двускатное покрытие: mu={mu:.2f}")
-        
-        # Неравномерный вариант (п. Б.4)
-        notes.append("ВНИМАНИЕ: Для двускатных кровель требуется дополнительная проверка "
-                    "неравномерного распределения (mu_max до 1.25 для alpha<=30deg)")
+    psets = element.get("psets", {})
+    area = 0.0
     
-    elif params.roof_type == "arch":
-        # Сводчатое покрытие - приблизительно
-        mu = 1.0
-        notes.append("Сводчатое покрытие: принято mu=1.0 (требуется детальный расчёт по Б.8)")
+    # Площадь из Qto
+    qto_slab = psets.get("Qto_SlabBaseQuantities", {})
+    if "GrossArea" in qto_slab:
+        area = float(qto_slab["GrossArea"])
+    elif "NetArea" in qto_slab:
+        area = float(qto_slab["NetArea"])
     
-    else:
-        mu = 1.0
-        notes.append(f"Неизвестный тип кровли '{params.roof_type}': принято mu=1.0")
+    # Pset для кровли
+    roof_pset = psets.get("Pset_RoofCommon", {})
+    if "ProjectedArea" in roof_pset:
+        area = float(roof_pset["ProjectedArea"])
     
-    # Учёт перепада высот (Приложение Б, схемы Б.11-Б.14)
-    if params.adjacent_roof and params.height_difference_m > 0:
-        # Упрощённый учёт снегового мешка
-        h = params.height_difference_m
-        # mu может достигать 2.5-4.0 в зоне мешка
-        mu_local = min(2.0 * h / 1.0 + 1.0, 4.0)  # Упрощённая формула
-        notes.append(f"ВНИМАНИЕ: Перепад высот {h:.1f}м - локальный mu может достигать {mu_local:.1f}")
-        notes.append("Требуется детальный расчёт снегового мешка по прил. Б")
+    if area <= 0:
+        return None
     
-    # Учёт парапета
-    if params.parapet_height_m > 0.6:
-        notes.append(f"Парапет h={params.parapet_height_m:.2f}м - возможно образование снегового мешка")
-    
-    return mu, notes
-
-
-def calculate_snow_load(params: SnowLoadParams) -> SnowLoadResult:
-    """
-    Расчёт снеговой нагрузки по СП 20.13330.2016.
-    
-    Формула: S = Sg x mu x Ce x Ct x gamma_f
-    где:
-        S - расчётное значение снеговой нагрузки
-        Sg - вес снегового покрова (по району)
-        mu - коэффициент перехода
-        Ce - коэффициент сноса
-        Ct - термический коэффициент
-        gamma_f - коэффициент надёжности
-    """
-    notes = []
-    
-    # Получаем Sg по снеговому району
-    Sg = SNOW_REGIONS_SG.get(params.snow_region, 1.5)
-    if params.snow_region not in SNOW_REGIONS_SG:
-        notes.append(f"Неизвестный снеговой район '{params.snow_region}', принято Sg={Sg} кПа (район III)")
-    else:
-        notes.append(f"Снеговой район {params.snow_region}: Sg={Sg} кПа")
-    
-    # Определяем коэффициент mu
-    mu, mu_notes = calculate_mu(params)
-    notes.extend(mu_notes)
-    
-    # Коэффициенты
-    Ce = params.Ce
-    Ct = params.Ct
-    
-    if Ce != 1.0:
-        notes.append(f"Коэффициент сноса Ce={Ce} (учтён снос снега ветром)")
-    if Ct != 1.0:
-        notes.append(f"Термический коэффициент Ct={Ct}")
-    
-    # Нормативное значение снеговой нагрузки
-    S0 = Sg * mu * Ce * Ct
-    notes.append(f"S0 = SgxmuxCexCt = {Sg}x{mu:.2f}x{Ce}x{Ct} = {S0:.3f} кПа")
-    
-    # Расчётное значение
-    gamma_f = GAMMA_F_SNOW
-    S = S0 * gamma_f
-    notes.append(f"S = S0xgamma_f = {S0:.3f}x{gamma_f} = {S:.3f} кПа")
-    
-    # Полная нагрузка на элемент
-    area = params.area_m2 if params.area_m2 > 0 else 0.0
-    total_load = S * area  # кПа x м2 = кН
-    if area > 0:
-        notes.append(f"Полная снеговая нагрузка: {S:.3f} x {area:.2f} = {total_load:.2f} кН")
-    
-    return SnowLoadResult(
-        element_id=params.element_id,
-        element_name=params.element_name,
-        Sg=Sg,
-        mu=mu,
-        Ce=Ce,
-        Ct=Ct,
-        S0=S0,
-        S=S,
-        gamma_f=gamma_f,
-        area_m2=area,
-        total_load_kN=total_load,
-        notes=notes
+    return SnowLoadInput(
+        element_id=element.get("global_id", ""),
+        element_name=element.get("name", ""),
+        area_m2=area
     )
 
 
-def extract_snow_params_from_ifc_element(element: Dict[str, Any]) -> SnowLoadParams:
+class NormCADSnowLoad:
     """
-    Извлечение параметров из элемента IFC.
+    Расчёт снеговой нагрузки через API NormCAD.
     
-    ВАЖНО: Большинство параметров для расчёта снега НЕ содержатся в типичных IFC файлах.
-    Функция извлекает то, что возможно, и использует значения по умолчанию для остального.
+    Использует библиотеку NCAPI.dll согласно документации:
+    https://normcad.ru/s/book/NCBkP.pdf
+    
+    Модуль: "Нагрузки и воздействия" -> Снеговая нагрузка
     """
-    params = SnowLoadParams()
     
-    # Базовая идентификация
-    params.element_id = element.get("global_id", "")
-    params.element_name = element.get("name", "")
+    def __init__(self):
+        """Инициализация COM объекта NormCAD."""
+        if not HAS_WIN32COM:
+            raise RuntimeError("Требуется установить pywin32: pip install pywin32")
+        
+        # Создаём экземпляр объекта отчёта (п. 3.1 документации)
+        self.ncApiR = win32com.client.Dispatch("ncApi.Report")
+        
+        # Объект переменных расчётного модуля
+        self.vars = None
     
-    # Попытка извлечь площадь из Qto
-    psets = element.get("psets", {})
+    def setup_task(self, task_name: str):
+        """
+        Настройка переменных задания (п. 3.2 документации).
+        
+        Args:
+            task_name: Название задания (отображается в отчёте)
+        """
+        # Norm - название нормативного документа
+        self.ncApiR.Norm = "СП 20.13330.2016"
+        
+        # TaskName - название задания
+        self.ncApiR.TaskName = task_name
+        
+        # Unit - перечень пунктов задания (раздел 10 - снеговые нагрузки)
+        self.ncApiR.Unit = "п.10"
     
-    # Для плит (IfcSlab) - площадь покрытия
-    qto = psets.get("Qto_SlabBaseQuantities", {})
-    if "GrossArea" in qto:
-        params.area_m2 = float(qto["GrossArea"])
-    elif "NetArea" in qto:
-        params.area_m2 = float(qto["NetArea"])
+    def set_input_data(self, data: SnowLoadInput):
+        """
+        Передача исходных данных (п. 3.3 документации).
+        
+        Args:
+            data: Данные для расчёта (частично из IFC, частично по умолчанию)
+        """
+        # Получаем Sg по району
+        Sg = SNOW_REGIONS_SG.get(data.snow_region, 1.5)
+        
+        # Подготовка массива переменных для NormCAD
+        # Формат зависит от конкретного модуля "Снеговая нагрузка"
+        vars_data = {
+            # Исходные данные по СП 20 п.10
+            "Sg": Sg,                      # Вес снегового покрова, кПа
+            "mu": data.mu,                 # Коэффициент перехода (неравномерность)
+            "Ce": data.Ce,                 # Коэффициент сноса
+            "Ct": data.Ct,                 # Термический коэффициент
+            "gamma_f": 1.4,                # Коэф. надёжности по снеговой нагрузке
+            "alpha": data.roof_angle_deg,  # Угол наклона кровли
+            "A": data.area_m2,             # Площадь покрытия
+            
+            # Параметры для учёта неравномерности (прил. Б СП 20)
+            "snow_region": data.snow_region,
+        }
+        
+        # Передача данных через SetVars
+        if self.vars:
+            self.ncApiR.SetVars(self.vars)
+        
+        return vars_data
     
-    # Попытка определить угол наклона (редко в IFC)
-    # Обычно требуется анализ геометрии
+    def set_conditions(self, conditions: Dict[str, Any]):
+        """
+        Передача условий расчёта (п. 3.3 документации).
+        
+        Args:
+            conditions: Словарь условий (тип кровли, наличие перепадов и т.д.)
+        """
+        # ArConds - массив условий
+        # Например: тип кровли, наличие снеговых мешков и т.д.
+        if conditions:
+            self.ncApiR.SetConds(conditions)
+            self.ncApiR.ClcLoadConds()
     
-    # Pset для кровли (если есть)
-    roof_pset = psets.get("Pset_RoofCommon", {})
-    if "ProjectedArea" in roof_pset:
-        params.area_m2 = float(roof_pset["ProjectedArea"])
+    def calculate(self) -> float:
+        """
+        Запуск расчёта (п. 3.4 документации).
+        
+        Returns:
+            Максимальный коэффициент использования (MaxResult)
+        """
+        # Загрузка нормативного модуля
+        self.ncApiR.ClcLoadNorm()
+        
+        # Загрузка данных
+        self.ncApiR.ClcLoadData()
+        
+        # Запуск расчёта
+        self.ncApiR.ClcCalc()
+        
+        # Возврат максимального коэффициента использования
+        return self.ncApiR.MaxResult
     
-    return params
+    def save_report(self, file_path: str):
+        """
+        Сохранение отчёта (п. 3.4 документации).
+        
+        Args:
+            file_path: Путь к файлу отчёта
+        """
+        self.ncApiR.MakeReport(file_path)
+    
+    def save_report_word(self, file_path: str):
+        """
+        Сохранение отчёта в Word с рамкой и штампом.
+        
+        Args:
+            file_path: Путь к файлу .doc
+        """
+        self.ncApiR.SendToWord(file_path)
+    
+    def check_license(self) -> bool:
+        """
+        Проверка наличия аппаратного ключа защиты.
+        
+        Returns:
+            True если ключ подключён
+        """
+        return self.ncApiR.TestKey()
 
 
-def process_ifc_data(jsonl_path: str, output_path: Optional[str] = None,
-                     default_params: Optional[Dict[str, Any]] = None) -> List[SnowLoadResult]:
+def process_ifc_file(jsonl_path: str, 
+                     snow_region: str = "III",
+                     report_dir: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    Обработка JSONL файла с данными IFC и расчёт снеговых нагрузок.
+    Обработка JSONL файла с данными IFC через API NormCAD.
     
     Args:
         jsonl_path: Путь к JSONL файлу с извлечёнными данными IFC
-        output_path: Путь для сохранения результатов (опционально)
-        default_params: Параметры по умолчанию для расчёта
+        snow_region: Снеговой район (НЕ из IFC, задаётся вручную)
+        report_dir: Директория для сохранения отчётов (опционально)
     
     Returns:
         Список результатов расчёта
     """
     results = []
-    defaults = default_params or {}
     
     with open(jsonl_path, 'r', encoding='utf-8') as f:
         for line in f:
@@ -283,139 +269,191 @@ def process_ifc_data(jsonl_path: str, output_path: Optional[str] = None,
             
             element = json.loads(line)
             
-            # Обрабатываем только элементы покрытия (плиты кровли)
-            ifc_class = element.get("ifc_class", "")
-            if ifc_class not in ["IfcSlab", "IfcRoof"]:
+            # Извлечение данных из IFC
+            data = extract_from_ifc_element(element)
+            if not data:
                 continue
             
-            # Проверяем, что это кровля
-            predefined_type = element.get("predefined_type", "")
-            psets = element.get("psets", {})
-            is_roof = (predefined_type == "ROOF" or 
-                      "Roof" in element.get("name", "") or
-                      "Кровля" in element.get("name", ""))
+            # Применяем параметры по умолчанию (НЕ из IFC)
+            data.snow_region = snow_region
             
-            if not is_roof and ifc_class != "IfcRoof":
-                continue
+            Sg = SNOW_REGIONS_SG.get(snow_region, 1.5)
             
-            params = extract_snow_params_from_ifc_element(element)
+            result = {
+                "element_id": data.element_id,
+                "element_name": data.element_name,
+                "area_m2": data.area_m2,
+                "area_source": "from IFC (Qto)",
+                "snow_region": snow_region,
+                "snow_region_source": "default (NOT from IFC)",
+                "Sg_kPa": Sg,
+                "mu": data.mu,
+                "mu_source": "default (NOT from IFC)",
+                "Ce": data.Ce,
+                "Ct": data.Ct,
+            }
             
-            # Применяем значения по умолчанию
-            for key, value in defaults.items():
-                if hasattr(params, key):
-                    setattr(params, key, value)
+            # Попытка расчёта через NormCAD API
+            if HAS_WIN32COM:
+                try:
+                    calc = NormCADSnowLoad()
+                    calc.setup_task(f"Снеговая нагрузка - {data.element_name}")
+                    calc.set_input_data(data)
+                    
+                    if calc.check_license():
+                        max_result = calc.calculate()
+                        result["max_result"] = max_result
+                        result["status"] = "calculated"
+                        
+                        if report_dir:
+                            report_path = Path(report_dir) / f"snow_load_{data.element_id}.txt"
+                            calc.save_report(str(report_path))
+                            result["report"] = str(report_path)
+                    else:
+                        result["status"] = "no_license"
+                        result["error"] = "NormCAD license key not found"
+                        
+                except Exception as e:
+                    result["status"] = "error"
+                    result["error"] = str(e)
+            else:
+                result["status"] = "no_win32com"
+                result["error"] = "pywin32 not installed"
             
-            result = calculate_snow_load(params)
             results.append(result)
-    
-    # Сохранение результатов
-    if output_path:
-        with open(output_path, 'w', encoding='utf-8') as f:
-            for r in results:
-                f.write(json.dumps(r.__dict__, ensure_ascii=False, indent=2))
-                f.write("\n")
     
     return results
 
 
-# ============== ИНТЕГРАЦИЯ С NormCAD API ==============
-
-def prepare_normcad_snow_data(result: SnowLoadResult) -> Dict[str, Any]:
+def calculate_single(
+    area_m2: float,
+    snow_region: str = "III",
+    mu: float = 1.0,
+    Ce: float = 1.0,
+    Ct: float = 1.0,
+    roof_angle_deg: float = 0.0,
+    task_name: str = "Снеговая нагрузка",
+    report_path: Optional[str] = None
+) -> Dict[str, Any]:
     """
-    Подготовка данных для передачи в NormCAD API.
+    Расчёт снеговой нагрузки для одного элемента через API NormCAD.
     
-    Формирует словарь переменных для модуля "Нагрузки и воздействия".
+    Args:
+        area_m2: Площадь покрытия (может быть из IFC)
+        snow_region: Снеговой район I-VIII (НЕ из IFC)
+        mu: Коэффициент перехода (НЕ из IFC)
+        Ce: Коэффициент сноса (НЕ из IFC)
+        Ct: Термический коэффициент (НЕ из IFC)
+        roof_angle_deg: Угол наклона кровли (НЕ из IFC)
+        task_name: Название задания для отчёта
+        report_path: Путь для сохранения отчёта
+    
+    Returns:
+        Словарь с результатами
     """
-    return {
-        "Norm": "СП 20.13330.2016",
-        "TaskName": f"Снеговая нагрузка - {result.element_name}",
-        "Unit": "п.10",
-        
-        # Исходные данные
-        "SnowRegion": result.Sg,  # Вес снегового покрова
-        "Mu": result.mu,          # Коэффициент mu
-        "Ce": result.Ce,          # Коэффициент сноса
-        "Ct": result.Ct,          # Термический коэффициент
-        "GammaF": result.gamma_f, # Коэффициент надёжности
-        
-        # Результаты
-        "S0": result.S0,          # Нормативное значение
-        "S": result.S,            # Расчётное значение
-        "Area": result.area_m2,
-        "TotalLoad": result.total_load_kN,
+    data = SnowLoadInput(
+        area_m2=area_m2,
+        snow_region=snow_region,
+        mu=mu,
+        Ce=Ce,
+        Ct=Ct,
+        roof_angle_deg=roof_angle_deg
+    )
+    
+    Sg = SNOW_REGIONS_SG.get(snow_region, 1.5)
+    
+    result = {
+        "area_m2": area_m2,
+        "snow_region": snow_region,
+        "Sg_kPa": Sg,
+        "mu": mu,
+        "Ce": Ce,
+        "Ct": Ct,
+        "roof_angle_deg": roof_angle_deg,
     }
+    
+    if HAS_WIN32COM:
+        try:
+            calc = NormCADSnowLoad()
+            calc.setup_task(task_name)
+            calc.set_input_data(data)
+            
+            if calc.check_license():
+                max_result = calc.calculate()
+                result["max_result"] = max_result
+                result["status"] = "calculated"
+                
+                if report_path:
+                    calc.save_report(report_path)
+                    result["report"] = report_path
+            else:
+                result["status"] = "no_license"
+                result["error"] = "NormCAD license key not found"
+                
+        except Exception as e:
+            result["status"] = "error"
+            result["error"] = str(e)
+    else:
+        result["status"] = "no_win32com"
+        result["error"] = "pywin32 not installed"
+    
+    return result
 
 
 # ============== ПРИМЕР ИСПОЛЬЗОВАНИЯ ==============
 
 if __name__ == "__main__":
-    import sys
+    print("=" * 70)
+    print("РАСЧЁТ СНЕГОВОЙ НАГРУЗКИ ЧЕРЕЗ API NormCAD")
+    print("=" * 70)
     
-    # Пример расчёта с параметрами по умолчанию
-    print("=" * 60)
-    print("РАСЧЁТ СНЕГОВОЙ НАГРУЗКИ ПО СП 20.13330.2016")
-    print("=" * 60)
+    # Пример 1: Расчёт для одного элемента
+    print("\n--- Пример: расчёт для площади 100 м2 ---")
     
-    # Демонстрационный расчёт
-    demo_params = SnowLoadParams(
-        element_id="demo_roof_001",
-        element_name="Плита покрытия",
-        area_m2=100.0,  # 100 м2
-        snow_region="III",  # Снеговой район III (Sg=1.5 кПа)
-        roof_angle_deg=10.0,  # Угол наклона 10deg
-        roof_type="flat",
-        Ce=1.0,
-        Ct=1.0,
+    result = calculate_single(
+        area_m2=100.0,           # Площадь (может быть из IFC)
+        snow_region="III",       # НЕ из IFC
+        mu=1.0,                  # НЕ из IFC
+        Ce=1.0,                  # НЕ из IFC
+        Ct=1.0,                  # НЕ из IFC
+        roof_angle_deg=0.0,      # НЕ из IFC
     )
     
-    result = calculate_snow_load(demo_params)
-    
-    print(f"\nЭлемент: {result.element_name} ({result.element_id})")
     print(f"\nИсходные данные:")
-    print(f"  Снеговой район: III (Sg = {result.Sg} кПа)")
-    print(f"  Коэффициент mu = {result.mu:.2f}")
-    print(f"  Коэффициент Ce = {result.Ce}")
-    print(f"  Коэффициент Ct = {result.Ct}")
-    print(f"  Площадь покрытия = {result.area_m2} м2")
+    print(f"  Площадь: {result['area_m2']} м2")
+    print(f"  Снеговой район: {result['snow_region']} (Sg = {result['Sg_kPa']} кПа)")
+    print(f"  Коэффициент mu: {result['mu']}")
+    print(f"  Коэффициент Ce: {result['Ce']}")
+    print(f"  Коэффициент Ct: {result['Ct']}")
+    print(f"\nСтатус: {result['status']}")
+    if "error" in result:
+        print(f"Ошибка: {result['error']}")
+    if "max_result" in result:
+        print(f"MaxResult: {result['max_result']}")
     
-    print(f"\nРезультаты:")
-    print(f"  Нормативная снеговая нагрузка S0 = {result.S0:.3f} кПа")
-    print(f"  Расчётная снеговая нагрузка S = {result.S:.3f} кПа")
-    print(f"  Полная нагрузка на покрытие = {result.total_load_kN:.2f} кН")
+    # Пример 2: Обработка IFC файла
+    jsonl_path = Path(__file__).parent.parent / "output.jsonl"
     
-    print(f"\nПримечания:")
-    for note in result.notes:
-        print(f"  • {note}")
+    if jsonl_path.exists():
+        print(f"\n--- Обработка IFC файла: {jsonl_path} ---")
+        results = process_ifc_file(str(jsonl_path), snow_region="III")
+        
+        if results:
+            for r in results:
+                print(f"\nЭлемент: {r['element_name']}")
+                print(f"  Площадь: {r['area_m2']} м2 ({r['area_source']})")
+                print(f"  Статус: {r['status']}")
+        else:
+            print("Элементы кровли не найдены в IFC файле")
     
-    print("\n" + "=" * 60)
-    print("НЕДОСТАЮЩИЕ ДАННЫЕ ИЗ IFC:")
-    print("=" * 60)
-    print("""
-Следующие параметры НЕ извлекаются из типичного IFC файла
-и должны быть заданы вручную или получены из других источников:
-
-1. snow_region - Снеговой район строительства
-   -> Определяется по карте районирования РФ (рис. 10.1 СП 20)
-   -> По умолчанию: III район (Sg = 1.5 кПа)
-
-2. roof_angle_deg - Угол наклона кровли
-   -> Может быть вычислен из геометрии IFC
-   -> По умолчанию: 0deg (плоская кровля)
-
-3. roof_type - Тип кровли
-   -> Определяет схему распределения снега
-   -> По умолчанию: 'flat'
-
-4. Ce - Коэффициент сноса снега ветром
-   -> Зависит от скорости ветра и рельефа
-   -> По умолчанию: 1.0
-
-5. Ct - Термический коэффициент
-   -> Учитывает теплопотери через покрытие
-   -> По умолчанию: 1.0
-
-6. Параметры неравномерности (снеговые мешки):
-   - parapet_height_m - высота парапета
-   - adjacent_roof - наличие перепада высот
-   - height_difference_m - величина перепада
-""")
+    print("\n" + "=" * 70)
+    print("ДАННЫЕ ИЗ IFC:")
+    print("  [+] Площадь покрытия (GrossArea/NetArea из Qto)")
+    print("  [+] Идентификация элемента (global_id, name)")
+    print("\nДАННЫЕ НЕ ИЗ IFC (задаются вручную):")
+    print("  [-] snow_region - Снеговой район (I-VIII)")
+    print("  [-] mu - Коэффициент перехода (неравномерность)")
+    print("  [-] Ce - Коэффициент сноса снега ветром")
+    print("  [-] Ct - Термический коэффициент")
+    print("  [-] roof_angle_deg - Угол наклона кровли")
+    print("=" * 70)
