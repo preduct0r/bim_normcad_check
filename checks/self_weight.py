@@ -28,7 +28,7 @@ from pathlib import Path
 
 # ============== СПРАВОЧНЫЕ ДАННЫЕ ПО ПЛОТНОСТИ МАТЕРИАЛОВ ==============
 
-# Плотности материалов, кг/м³ (из СП 20, Приложение Г и справочников)
+# Плотности материалов, кг/м3 (из СП 20, Приложение Г и справочников)
 MATERIAL_DENSITIES = {
     # Древесина
     "wood": 500,
@@ -66,8 +66,8 @@ MATERIAL_DENSITIES = {
 }
 
 # Коэффициент надёжности по постоянным нагрузкам (п. 7.2 СП 20)
-# γf = 1.1 при неблагоприятном действии (увеличение веса)
-# γf = 0.9 при благоприятном действии (уменьшение веса)
+# gamma_f = 1.1 при неблагоприятном действии (увеличение веса)
+# gamma_f = 0.9 при благоприятном действии (уменьшение веса)
 GAMMA_F_PERMANENT_UNFAV = 1.1
 GAMMA_F_PERMANENT_FAV = 0.9
 
@@ -82,9 +82,9 @@ class SelfWeightParams:
     ifc_class: str = ""
     
     # Геометрия (из Qto или section_approx)
-    volume_m3: float = 0.0          # Объём, м³
+    volume_m3: float = 0.0          # Объём, м3
     length_m: float = 0.0           # Длина (для линейных элементов), м
-    cross_section_area_m2: float = 0.0  # Площадь сечения, м²
+    cross_section_area_m2: float = 0.0  # Площадь сечения, м2
     
     # Материал
     material_name: str = ""         # Название материала из IFC
@@ -182,25 +182,25 @@ def calculate_self_weight(params: SelfWeightParams) -> SelfWeightResult:
     Расчёт собственного веса элемента.
     
     Формулы:
-    G = ρ × V × g  - вес элемента
+    G = ro x V x g  - вес элемента
     где:
-        ρ - плотность материала, кг/м³
-        V - объём элемента, м³
+        ro - плотность материала, кг/м3
+        V - объём элемента, м3
         g ≈ 10 м/с² (или 9.81 для точного расчёта)
     """
     notes = []
-    g = 9.81 / 1000  # м/с² → кН/кг
+    g = 9.81 / 1000  # м/с² -> кН/кг
     
     # Определение плотности
     density, density_source = get_material_density(params.material_name, params.density_kg_m3)
     
     if density_source == "default":
         notes.append(f"ВНИМАНИЕ: Плотность материала '{params.material_name}' не найдена, "
-                    f"принято ρ={density} кг/м³ (бетон)")
+                    f"принято ro={density} кг/м3 (бетон)")
     elif density_source == "lookup":
-        notes.append(f"Материал: {params.material_name}, плотность ρ={density} кг/м³ (из справочника)")
+        notes.append(f"Материал: {params.material_name}, плотность ro={density} кг/м3 (из справочника)")
     else:
-        notes.append(f"Материал: {params.material_name}, плотность ρ={density} кг/м³ (задано)")
+        notes.append(f"Материал: {params.material_name}, плотность ro={density} кг/м3 (задано)")
     
     # Определение объёма
     volume = params.volume_m3
@@ -208,9 +208,9 @@ def calculate_self_weight(params: SelfWeightParams) -> SelfWeightResult:
     if volume <= 0 and params.length_m > 0 and params.cross_section_area_m2 > 0:
         # Расчёт объёма по длине и площади сечения
         volume = params.length_m * params.cross_section_area_m2
-        notes.append(f"Объём рассчитан: V = L × A = {params.length_m:.3f} × {params.cross_section_area_m2:.6f} = {volume:.6f} м³")
+        notes.append(f"Объём рассчитан: V = L x A = {params.length_m:.3f} x {params.cross_section_area_m2:.6f} = {volume:.6f} м3")
     elif volume > 0:
-        notes.append(f"Объём из IFC: V = {volume:.6f} м³")
+        notes.append(f"Объём из IFC: V = {volume:.6f} м3")
     else:
         notes.append("ВНИМАНИЕ: Объём элемента не определён!")
     
@@ -218,13 +218,13 @@ def calculate_self_weight(params: SelfWeightParams) -> SelfWeightResult:
     mass = density * volume  # кг
     weight_norm = mass * g   # кН
     
-    notes.append(f"Масса: m = ρ × V = {density} × {volume:.6f} = {mass:.2f} кг")
-    notes.append(f"Нормативный вес: G0 = m × g = {mass:.2f} × {g:.4f} = {weight_norm:.4f} кН")
+    notes.append(f"Масса: m = ro x V = {density} x {volume:.6f} = {mass:.2f} кг")
+    notes.append(f"Нормативный вес: G0 = m x g = {mass:.2f} x {g:.4f} = {weight_norm:.4f} кН")
     
     # Расчётный вес
     gamma_f = params.gamma_f
     weight_calc = weight_norm * gamma_f
-    notes.append(f"Расчётный вес: G = G0 × γf = {weight_norm:.4f} × {gamma_f} = {weight_calc:.4f} кН")
+    notes.append(f"Расчётный вес: G = G0 x gamma_f = {weight_norm:.4f} x {gamma_f} = {weight_calc:.4f} кН")
     
     # Линейная нагрузка для балок/колонн
     linear_load = None
@@ -313,7 +313,7 @@ def extract_self_weight_params_from_ifc_element(element: Dict[str, Any]) -> Self
             params.length_m = length_val / 1000.0 if length_val > 100 else length_val
         
         if params.cross_section_area_m2 == 0:
-            # Расчёт площади из b × h
+            # Расчёт площади из b x h
             b = section.get("b", 0)
             h = section.get("h", 0)
             if b > 0 and h > 0:
@@ -417,8 +417,8 @@ if __name__ == "__main__":
         for result in results:
             print(f"\n{result.ifc_class}: {result.element_name}")
             print(f"  ID: {result.element_id}")
-            print(f"  Материал: {result.material_name} (ρ={result.density_kg_m3} кг/м³)")
-            print(f"  Объём: {result.volume_m3:.6f} м³")
+            print(f"  Материал: {result.material_name} (ro={result.density_kg_m3} кг/м3)")
+            print(f"  Объём: {result.volume_m3:.6f} м3")
             print(f"  Длина: {result.length_m:.3f} м")
             print(f"  Масса: {result.mass_kg:.2f} кг")
             print(f"  Нормативный вес: {result.weight_norm_kN:.4f} кН")
@@ -440,9 +440,9 @@ if __name__ == "__main__":
             element_id="demo_beam_001",
             element_name="Балка деревянная 100x200",
             ifc_class="IfcBeam",
-            volume_m3=0.054,  # 2.7м × 0.1м × 0.2м
+            volume_m3=0.054,  # 2.7м x 0.1м x 0.2м
             length_m=2.7,
-            cross_section_area_m2=0.02,  # 100мм × 200мм
+            cross_section_area_m2=0.02,  # 100мм x 200мм
             material_name="wood_spruce_beam",
         )
         
@@ -452,15 +452,15 @@ if __name__ == "__main__":
         print(f"Класс IFC: {result.ifc_class}")
         print(f"\nИсходные данные:")
         print(f"  Материал: {result.material_name}")
-        print(f"  Плотность: {result.density_kg_m3} кг/м³ ({result.density_source})")
-        print(f"  Объём: {result.volume_m3:.6f} м³")
+        print(f"  Плотность: {result.density_kg_m3} кг/м3 ({result.density_source})")
+        print(f"  Объём: {result.volume_m3:.6f} м3")
         print(f"  Длина: {result.length_m:.3f} м")
-        print(f"  Площадь сечения: {result.cross_section_area_m2:.6f} м²")
+        print(f"  Площадь сечения: {result.cross_section_area_m2:.6f} м2")
         
         print(f"\nРезультаты:")
         print(f"  Масса: {result.mass_kg:.2f} кг")
         print(f"  Нормативный вес: {result.weight_norm_kN:.4f} кН")
-        print(f"  Расчётный вес (γf={result.gamma_f}): {result.weight_calc_kN:.4f} кН")
+        print(f"  Расчётный вес (gamma_f={result.gamma_f}): {result.weight_calc_kN:.4f} кН")
         print(f"  Погонная нагрузка: {result.linear_load_kN_m:.4f} кН/м")
     
     print("\n" + "=" * 70)
@@ -468,19 +468,19 @@ if __name__ == "__main__":
     print("=" * 70)
     print("""
 Данные, которые ИЗВЛЕКАЮТСЯ из IFC:
-✓ Объём элемента (NetVolume из Qto_*BaseQuantities)
-✓ Длина элемента (Length из Qto или section_approx)
-✓ Площадь сечения (CrossSectionArea из Qto или b×h из section_approx)
-✓ Название материала (из materials)
+[+] Объём элемента (NetVolume из Qto_*BaseQuantities)
+[+] Длина элемента (Length из Qto или section_approx)
+[+] Площадь сечения (CrossSectionArea из Qto или bxh из section_approx)
+[+] Название материала (из materials)
 
 Данные, которые НЕ извлекаются из IFC (используются справочные):
-✗ Плотность материала → определяется по названию из справочника
-✗ Коэффициент надёжности γf → по умолчанию 1.1 (неблагоприятное действие)
+[-] Плотность материала -> определяется по названию из справочника
+[-] Коэффициент надёжности gamma_f -> по умолчанию 1.1 (неблагоприятное действие)
 
 Справочник плотностей материалов:
-  - Сталь: 7850 кг/м³
-  - Бетон: 2500 кг/м³
-  - Древесина (ель): 450 кг/м³
-  - Древесина (сосна): 500 кг/м³
-  - Кирпич: 1800 кг/м³
+  - Сталь: 7850 кг/м3
+  - Бетон: 2500 кг/м3
+  - Древесина (ель): 450 кг/м3
+  - Древесина (сосна): 500 кг/м3
+  - Кирпич: 1800 кг/м3
 """)

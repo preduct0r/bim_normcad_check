@@ -5,13 +5,13 @@
 
 Модуль вычисляет снеговую нагрузку с учётом:
 - Снегового района (Sg)
-- Коэффициента μ (учёт неравномерности распределения снега)
+- Коэффициента mu (учёт неравномерности распределения снега)
 - Коэффициентов надёжности по нагрузке
 
 ВАЖНО: Следующие параметры НЕ извлекаются из IFC и заданы по умолчанию:
 - snow_region: снеговой район (по умолчанию III)
-- roof_angle: угол наклона кровли (по умолчанию 0°)
-- roof_type: тип кровли для определения μ (по умолчанию 'flat')
+- roof_angle: угол наклона кровли (по умолчанию 0deg)
+- roof_type: тип кровли для определения mu (по умолчанию 'flat')
 - Ce: коэффициент, учитывающий снос снега с покрытий (по умолчанию 1.0)
 - Ct: термический коэффициент (по умолчанию 1.0)
 """
@@ -91,26 +91,26 @@ class SnowLoadResult:
 
 def calculate_mu(params: SnowLoadParams) -> tuple[float, List[str]]:
     """
-    Определение коэффициента μ по СП 20 (Приложение Б).
+    Определение коэффициента mu по СП 20 (Приложение Б).
     
     Возвращает (mu, notes) - коэффициент и примечания о его определении.
     """
     notes = []
     alpha = params.roof_angle_deg
     
-    # Таблица Б.1 - Коэффициент μ для покрытий без перепада высот
+    # Таблица Б.1 - Коэффициент mu для покрытий без перепада высот
     if params.roof_type == "flat":
-        # Плоская кровля (α ≤ 25°)
+        # Плоская кровля (alpha <= 25deg)
         if alpha <= 25:
             mu = 1.0
-            notes.append(f"Плоская кровля (α={alpha}° ≤ 25°): μ=1.0 по табл. Б.1")
+            notes.append(f"Плоская кровля (alpha={alpha}deg <= 25deg): mu=1.0 по табл. Б.1")
         elif alpha <= 60:
-            # Линейная интерполяция μ = (60 - α) / 35
+            # Линейная интерполяция mu = (60 - alpha) / 35
             mu = (60 - alpha) / 35
-            notes.append(f"Скатная кровля (25° < α={alpha}° ≤ 60°): μ={(60-alpha)/35:.2f}")
+            notes.append(f"Скатная кровля (25deg < alpha={alpha}deg <= 60deg): mu={(60-alpha)/35:.2f}")
         else:
             mu = 0.0
-            notes.append(f"Крутая кровля (α={alpha}° > 60°): μ=0 (снег не задерживается)")
+            notes.append(f"Крутая кровля (alpha={alpha}deg > 60deg): mu=0 (снег не задерживается)")
     
     elif params.roof_type == "single_slope":
         # Односкатное покрытие
@@ -120,37 +120,37 @@ def calculate_mu(params: SnowLoadParams) -> tuple[float, List[str]]:
             mu = (60 - alpha) / 30
         else:
             mu = 0.0
-        notes.append(f"Односкатное покрытие: μ={mu:.2f}")
+        notes.append(f"Односкатное покрытие: mu={mu:.2f}")
     
     elif params.roof_type == "gable":
         # Двускатное покрытие (возможна неравномерность)
         if alpha <= 30:
             mu = 1.0  # Равномерная нагрузка
-            notes.append(f"Двускатное покрытие (α={alpha}° ≤ 30°): равномерная нагрузка, μ=1.0")
+            notes.append(f"Двускатное покрытие (alpha={alpha}deg <= 30deg): равномерная нагрузка, mu=1.0")
         else:
             mu = (60 - alpha) / 30 if alpha <= 60 else 0.0
-            notes.append(f"Двускатное покрытие: μ={mu:.2f}")
+            notes.append(f"Двускатное покрытие: mu={mu:.2f}")
         
         # Неравномерный вариант (п. Б.4)
         notes.append("ВНИМАНИЕ: Для двускатных кровель требуется дополнительная проверка "
-                    "неравномерного распределения (μ_max до 1.25 для α≤30°)")
+                    "неравномерного распределения (mu_max до 1.25 для alpha<=30deg)")
     
     elif params.roof_type == "arch":
         # Сводчатое покрытие - приблизительно
         mu = 1.0
-        notes.append("Сводчатое покрытие: принято μ=1.0 (требуется детальный расчёт по Б.8)")
+        notes.append("Сводчатое покрытие: принято mu=1.0 (требуется детальный расчёт по Б.8)")
     
     else:
         mu = 1.0
-        notes.append(f"Неизвестный тип кровли '{params.roof_type}': принято μ=1.0")
+        notes.append(f"Неизвестный тип кровли '{params.roof_type}': принято mu=1.0")
     
     # Учёт перепада высот (Приложение Б, схемы Б.11-Б.14)
     if params.adjacent_roof and params.height_difference_m > 0:
         # Упрощённый учёт снегового мешка
         h = params.height_difference_m
-        # μ может достигать 2.5-4.0 в зоне мешка
+        # mu может достигать 2.5-4.0 в зоне мешка
         mu_local = min(2.0 * h / 1.0 + 1.0, 4.0)  # Упрощённая формула
-        notes.append(f"ВНИМАНИЕ: Перепад высот {h:.1f}м - локальный μ может достигать {mu_local:.1f}")
+        notes.append(f"ВНИМАНИЕ: Перепад высот {h:.1f}м - локальный mu может достигать {mu_local:.1f}")
         notes.append("Требуется детальный расчёт снегового мешка по прил. Б")
     
     # Учёт парапета
@@ -164,14 +164,14 @@ def calculate_snow_load(params: SnowLoadParams) -> SnowLoadResult:
     """
     Расчёт снеговой нагрузки по СП 20.13330.2016.
     
-    Формула: S = Sg × μ × Ce × Ct × γf
+    Формула: S = Sg x mu x Ce x Ct x gamma_f
     где:
         S - расчётное значение снеговой нагрузки
         Sg - вес снегового покрова (по району)
-        μ - коэффициент перехода
+        mu - коэффициент перехода
         Ce - коэффициент сноса
         Ct - термический коэффициент
-        γf - коэффициент надёжности
+        gamma_f - коэффициент надёжности
     """
     notes = []
     
@@ -182,7 +182,7 @@ def calculate_snow_load(params: SnowLoadParams) -> SnowLoadResult:
     else:
         notes.append(f"Снеговой район {params.snow_region}: Sg={Sg} кПа")
     
-    # Определяем коэффициент μ
+    # Определяем коэффициент mu
     mu, mu_notes = calculate_mu(params)
     notes.extend(mu_notes)
     
@@ -197,18 +197,18 @@ def calculate_snow_load(params: SnowLoadParams) -> SnowLoadResult:
     
     # Нормативное значение снеговой нагрузки
     S0 = Sg * mu * Ce * Ct
-    notes.append(f"S0 = Sg×μ×Ce×Ct = {Sg}×{mu:.2f}×{Ce}×{Ct} = {S0:.3f} кПа")
+    notes.append(f"S0 = SgxmuxCexCt = {Sg}x{mu:.2f}x{Ce}x{Ct} = {S0:.3f} кПа")
     
     # Расчётное значение
     gamma_f = GAMMA_F_SNOW
     S = S0 * gamma_f
-    notes.append(f"S = S0×γf = {S0:.3f}×{gamma_f} = {S:.3f} кПа")
+    notes.append(f"S = S0xgamma_f = {S0:.3f}x{gamma_f} = {S:.3f} кПа")
     
     # Полная нагрузка на элемент
     area = params.area_m2 if params.area_m2 > 0 else 0.0
-    total_load = S * area  # кПа × м² = кН
+    total_load = S * area  # кПа x м2 = кН
     if area > 0:
-        notes.append(f"Полная снеговая нагрузка: {S:.3f} × {area:.2f} = {total_load:.2f} кН")
+        notes.append(f"Полная снеговая нагрузка: {S:.3f} x {area:.2f} = {total_load:.2f} кН")
     
     return SnowLoadResult(
         element_id=params.element_id,
@@ -333,7 +333,7 @@ def prepare_normcad_snow_data(result: SnowLoadResult) -> Dict[str, Any]:
         
         # Исходные данные
         "SnowRegion": result.Sg,  # Вес снегового покрова
-        "Mu": result.mu,          # Коэффициент μ
+        "Mu": result.mu,          # Коэффициент mu
         "Ce": result.Ce,          # Коэффициент сноса
         "Ct": result.Ct,          # Термический коэффициент
         "GammaF": result.gamma_f, # Коэффициент надёжности
@@ -360,9 +360,9 @@ if __name__ == "__main__":
     demo_params = SnowLoadParams(
         element_id="demo_roof_001",
         element_name="Плита покрытия",
-        area_m2=100.0,  # 100 м²
+        area_m2=100.0,  # 100 м2
         snow_region="III",  # Снеговой район III (Sg=1.5 кПа)
-        roof_angle_deg=10.0,  # Угол наклона 10°
+        roof_angle_deg=10.0,  # Угол наклона 10deg
         roof_type="flat",
         Ce=1.0,
         Ct=1.0,
@@ -373,10 +373,10 @@ if __name__ == "__main__":
     print(f"\nЭлемент: {result.element_name} ({result.element_id})")
     print(f"\nИсходные данные:")
     print(f"  Снеговой район: III (Sg = {result.Sg} кПа)")
-    print(f"  Коэффициент μ = {result.mu:.2f}")
+    print(f"  Коэффициент mu = {result.mu:.2f}")
     print(f"  Коэффициент Ce = {result.Ce}")
     print(f"  Коэффициент Ct = {result.Ct}")
-    print(f"  Площадь покрытия = {result.area_m2} м²")
+    print(f"  Площадь покрытия = {result.area_m2} м2")
     
     print(f"\nРезультаты:")
     print(f"  Нормативная снеговая нагрузка S0 = {result.S0:.3f} кПа")
@@ -395,24 +395,24 @@ if __name__ == "__main__":
 и должны быть заданы вручную или получены из других источников:
 
 1. snow_region - Снеговой район строительства
-   → Определяется по карте районирования РФ (рис. 10.1 СП 20)
-   → По умолчанию: III район (Sg = 1.5 кПа)
+   -> Определяется по карте районирования РФ (рис. 10.1 СП 20)
+   -> По умолчанию: III район (Sg = 1.5 кПа)
 
 2. roof_angle_deg - Угол наклона кровли
-   → Может быть вычислен из геометрии IFC
-   → По умолчанию: 0° (плоская кровля)
+   -> Может быть вычислен из геометрии IFC
+   -> По умолчанию: 0deg (плоская кровля)
 
 3. roof_type - Тип кровли
-   → Определяет схему распределения снега
-   → По умолчанию: 'flat'
+   -> Определяет схему распределения снега
+   -> По умолчанию: 'flat'
 
 4. Ce - Коэффициент сноса снега ветром
-   → Зависит от скорости ветра и рельефа
-   → По умолчанию: 1.0
+   -> Зависит от скорости ветра и рельефа
+   -> По умолчанию: 1.0
 
 5. Ct - Термический коэффициент
-   → Учитывает теплопотери через покрытие
-   → По умолчанию: 1.0
+   -> Учитывает теплопотери через покрытие
+   -> По умолчанию: 1.0
 
 6. Параметры неравномерности (снеговые мешки):
    - parapet_height_m - высота парапета

@@ -148,8 +148,8 @@ def calculate_k_ze(ze: float, terrain_type: str) -> Tuple[float, float]:
     """
     Расчёт коэффициента k(ze) и zeta(ze) по формуле 11.4 СП 20.
     
-    k(ze) = k10 × (ze/10)^(2α)  для ze ≥ z0
-    k(ze) = k10 × (z0/10)^(2α)  для ze < z0
+    k(ze) = k10 x (ze/10)^(2α)  для ze ≥ z0
+    k(ze) = k10 x (z0/10)^(2α)  для ze < z0
     
     Returns:
         (k, zeta) - высотный коэффициент и коэффициент пульсации
@@ -179,14 +179,14 @@ def calculate_correlation_coefficient(
     terrain_type: str = "B"
 ) -> float:
     """
-    Расчёт коэффициента пространственной корреляции ν по п. 11.1.11 СП 20.
+    Расчёт коэффициента пространственной корреляции nu по п. 11.1.11 СП 20.
     
     Args:
         rho: Параметр, учитывающий размер здания поперёк ветра
         chi: Параметр, учитывающий размер здания вдоль ветра
     """
     # Упрощённая формула для прямоугольных зданий
-    # ν = 1 / (1 + 0.8 × (ρ + χ))
+    # nu = 1 / (1 + 0.8 x (ρ + χ))
     nu = 1.0 / (1.0 + 0.8 * (rho + chi))
     return max(0.4, min(1.0, nu))
 
@@ -203,8 +203,8 @@ def calculate_wind_load(params: WindLoadParams) -> WindLoadResult:
     Расчёт ветровой нагрузки по СП 20.13330.2016.
     
     Формулы:
-    wm = w0 × k(ze) × c  - средняя составляющая
-    wp = wm × ζ × ν      - пульсационная составляющая
+    wm = w0 x k(ze) x c  - средняя составляющая
+    wp = wm x zeta x nu      - пульсационная составляющая
     w = wm + wp          - полная нагрузка
     """
     notes = []
@@ -232,7 +232,7 @@ def calculate_wind_load(params: WindLoadParams) -> WindLoadResult:
     # Высотный коэффициент и коэффициент пульсации
     k_ze, zeta = calculate_k_ze(ze, terrain)
     notes.append(f"Коэффициент k(ze) = {k_ze:.3f}")
-    notes.append(f"Коэффициент пульсации ζ(ze) = {zeta:.3f}")
+    notes.append(f"Коэффициент пульсации zeta(ze) = {zeta:.3f}")
     
     # Аэродинамический коэффициент
     c = get_aero_coefficient(params.surface_type, params.custom_aero_coef)
@@ -240,7 +240,7 @@ def calculate_wind_load(params: WindLoadParams) -> WindLoadResult:
     
     # Средняя составляющая ветровой нагрузки
     wm = w0 * k_ze * c
-    notes.append(f"Средняя составляющая wm = w0×k×c = {w0}×{k_ze:.3f}×{c:.2f} = {wm:.4f} кПа")
+    notes.append(f"Средняя составляющая wm = w0xkxc = {w0}x{k_ze:.3f}x{c:.2f} = {wm:.4f} кПа")
     
     # Пульсационная составляющая
     wp = 0.0
@@ -255,8 +255,8 @@ def calculate_wind_load(params: WindLoadParams) -> WindLoadResult:
             nu = calculate_correlation_coefficient(rho, chi, terrain)
         
         wp = abs(wm) * zeta * nu
-        notes.append(f"Коэффициент корреляции ν = {nu:.3f}")
-        notes.append(f"Пульсационная составляющая wp = wm×ζ×ν = {abs(wm):.4f}×{zeta:.3f}×{nu:.3f} = {wp:.4f} кПа")
+        notes.append(f"Коэффициент корреляции nu = {nu:.3f}")
+        notes.append(f"Пульсационная составляющая wp = wmxzetaxnu = {abs(wm):.4f}x{zeta:.3f}x{nu:.3f} = {wp:.4f} кПа")
     else:
         notes.append("Пульсационная составляющая не учитывается")
     
@@ -272,14 +272,14 @@ def calculate_wind_load(params: WindLoadParams) -> WindLoadResult:
     # Расчётная нагрузка
     gamma_f = GAMMA_F_WIND
     w_calc = w_norm * gamma_f
-    notes.append(f"Расчётная нагрузка w×γf = {w_norm:.4f}×{gamma_f} = {w_calc:.4f} кПа")
+    notes.append(f"Расчётная нагрузка wxgamma_f = {w_norm:.4f}x{gamma_f} = {w_calc:.4f} кПа")
     
     # Полная нагрузка на элемент
     area = params.element_area_m2 if params.element_area_m2 > 0 else 0.0
     total_load = abs(w_calc) * area
     
     if area > 0:
-        notes.append(f"Полная ветровая нагрузка на элемент: {abs(w_calc):.4f} × {area:.2f} = {total_load:.2f} кН")
+        notes.append(f"Полная ветровая нагрузка на элемент: {abs(w_calc):.4f} x {area:.2f} = {total_load:.2f} кН")
     
     # Учёт направлений ветра
     wind_directions = ["0°", "90°", "180°", "270°"]
@@ -443,7 +443,7 @@ if __name__ == "__main__":
     
     for surface, result in results.items():
         print(f"\n{surface.upper()}:")
-        print(f"  Площадь: {result.area_m2:.1f} м²")
+        print(f"  Площадь: {result.area_m2:.1f} м2")
         print(f"  Аэродинамический коэффициент c = {result.c:.2f}")
         print(f"  Средняя составляющая wm = {result.wm:.4f} кПа")
         print(f"  Пульсационная составляющая wp = {result.wp:.4f} кПа")
@@ -458,29 +458,29 @@ if __name__ == "__main__":
 Следующие параметры НЕ извлекаются из типичного IFC файла:
 
 1. wind_region - Ветровой район строительства
-   → Определяется по карте районирования РФ (рис. 11.1 СП 20)
-   → По умолчанию: III район (w0 = 0.38 кПа)
+   -> Определяется по карте районирования РФ (рис. 11.1 СП 20)
+   -> По умолчанию: III район (w0 = 0.38 кПа)
 
 2. terrain_type - Тип местности (A, B, C)
-   → A - открытая местность (побережья, степи)
-   → B - городская территория, лес
-   → C - городские районы с высотной застройкой
-   → По умолчанию: B
+   -> A - открытая местность (побережья, степи)
+   -> B - городская территория, лес
+   -> C - городские районы с высотной застройкой
+   -> По умолчанию: B
 
 3. building_height/width/length - Габариты здания
-   → Могут быть вычислены из bbox всех элементов IFC
-   → По умолчанию: требуется задать вручную
+   -> Могут быть вычислены из bbox всех элементов IFC
+   -> По умолчанию: требуется задать вручную
 
 4. surface_type - Тип поверхности для аэродинамического коэффициента
-   → Определяет знак и величину c
-   → По умолчанию: 'windward' (наветренная сторона)
+   -> Определяет знак и величину c
+   -> По умолчанию: 'windward' (наветренная сторона)
 
 5. Аэродинамические коэффициенты (c)
-   → Для сложных форм требуется CFD моделирование
-   → Или справочные данные из Приложения В СП 20
-   → По умолчанию: типовые значения для прямоугольного здания
+   -> Для сложных форм требуется CFD моделирование
+   -> Или справочные данные из Приложения В СП 20
+   -> По умолчанию: типовые значения для прямоугольного здания
 
 6. Динамические характеристики (для зданий h > 40м)
-   → Собственные частоты, логарифмический декремент
-   → Требуется специальный расчёт
+   -> Собственные частоты, логарифмический декремент
+   -> Требуется специальный расчёт
 """)
