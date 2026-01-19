@@ -36,6 +36,26 @@ def _is_32bit_python() -> bool:
     return struct.calcsize("P") * 8 == 32
 
 
+def _parse_csv_floats(s: str) -> Tuple[float, ...]:
+    parts = [p.strip() for p in (s or "").split(",")]
+    out: List[float] = []
+    for p in parts:
+        if not p:
+            continue
+        out.append(float(p))
+    if not out:
+        raise ValueError("empty float list")
+    return tuple(out)
+
+
+def _parse_csv_strings(s: str) -> Tuple[str, ...]:
+    parts = [p.strip() for p in (s or "").split(",")]
+    out = tuple([p for p in parts if p])
+    if not out:
+        raise ValueError("empty string list")
+    return out
+
+
 def _fix_mojibake_cp1251(s: str) -> str:
     """
     В репозитории VB-файл часто отображается с "кракозябрами" (CP1251 → Latin-1).
@@ -80,7 +100,39 @@ class RowForces:
     qy: float
 
 
-DIAMETERS: Tuple[float, ...] = (10, 12, 14, 16, 20)
+@dataclass(frozen=True)
+class ArmParams:
+    """
+    Все параметры имеют значения по умолчанию (как в VB-скрипте),
+    но их можно переопределять через CLI.
+    """
+
+    # COM ProgID нормативного модуля
+    progid: str = "NC_167258518177598E02.Vars"
+
+    # Переменные задания
+    gr_g__b1: float = 1.0
+    m__kp: float = 1.0
+
+    # Геометрия/шаги/защитные слои (в VB имена с кириллицей отображаются "кракозябрами")
+    s_low_x: float = 0.1
+    s_up_x: float = 0.1
+    s_low_y: float = 0.1
+    s_up_y: float = 0.1
+    a_low_x: float = 0.04
+    a_up_x: float = 0.04
+    a_low_y: float = 0.04
+    a_up_y: float = 0.04
+    h: float = 0.2
+    b: float = 1.0
+
+    # Списки проверок/диаметров
+    diameters: Tuple[float, ...] = (10, 12, 14, 16, 20)
+    pre_ex: Tuple[str, ...] = ("5.1.8", "5.1.9", "5.1.10", "5.2.7", "5.2.10")
+    check_ex: Tuple[str, ...] = ("6.2.7", "8.4 ÑÏ 52-103", "8.5 ÑÏ 52-103", "8.3.4")
+
+    # Условия расчёта
+    add_conds: bool = True
 
 # --- "кракозябры" из просмотра файла; конвертим в cp1251 через _s(...) ---
 CONDS_MOJIBAKE: Tuple[str, ...] = (
@@ -102,52 +154,49 @@ CONDS_MOJIBAKE: Tuple[str, ...] = (
     "Ïîïåðå÷íàÿ àðìàòóðà - íå ðàññìàòðèâàåòñÿ â äàííîì ðàñ÷åòå",
 )
 
-PRE_EX_MOJIBAKE: Tuple[str, ...] = ("5.1.8", "5.1.9", "5.1.10", "5.2.7", "5.2.10")
-CHECK_EX_MOJIBAKE: Tuple[str, ...] = ("6.2.7", "8.4 ÑÏ 52-103", "8.5 ÑÏ 52-103", "8.3.4")
-
-
 def _dispatch(progid: str):
     import win32com.client
 
     return win32com.client.Dispatch(progid)
 
 
-def _init_vars():
+def _init_vars(params: ArmParams):
     """
     Создаёт Vars/Conds и заполняет всё как в VBA (строки/значения).
     Возвращает Vars COM-объект.
     """
-    vars_obj = _dispatch("NC_167258518177598E02.Vars")
+    vars_obj = _dispatch(params.progid)
     conds = vars_obj.Conds
 
     # Переменные (как в VBA)
-    vars_obj[VN("gr_g__b1")].Value = 1
-    vars_obj[VN("m__kp")].Value = 1
+    vars_obj[VN("gr_g__b1")].Value = params.gr_g__b1
+    vars_obj[VN("m__kp")].Value = params.m__kp
 
     # Эти имена в VB идут с кириллицей (низ/верх), в репе они "кракозябрами".
-    vars_obj[_s("s__íx")].Value = 0.1
-    vars_obj[_s("s__âx")].Value = 0.1
-    vars_obj[_s("s__íy")].Value = 0.1
-    vars_obj[_s("s__ây")].Value = 0.1
-    vars_obj[_s("a__íx")].Value = 0.04
-    vars_obj[_s("a__âx")].Value = 0.04
-    vars_obj[_s("a__íy")].Value = 0.04
-    vars_obj[_s("a__ây")].Value = 0.04
-    vars_obj["h"].Value = 0.2
-    vars_obj["b"].Value = 1
+    vars_obj[VN(_s("s__íx"))].Value = params.s_low_x
+    vars_obj[VN(_s("s__âx"))].Value = params.s_up_x
+    vars_obj[VN(_s("s__íy"))].Value = params.s_low_y
+    vars_obj[VN(_s("s__ây"))].Value = params.s_up_y
+    vars_obj[VN(_s("a__íx"))].Value = params.a_low_x
+    vars_obj[VN(_s("a__âx"))].Value = params.a_up_x
+    vars_obj[VN(_s("a__íy"))].Value = params.a_low_y
+    vars_obj[VN(_s("a__ây"))].Value = params.a_up_y
+    vars_obj["h"].Value = params.h
+    vars_obj["b"].Value = params.b
 
     # Условия (как в VBA)
-    for c in CONDS_MOJIBAKE:
-        conds.Add(_s(c))
+    if params.add_conds:
+        for c in CONDS_MOJIBAKE:
+            conds.Add(_s(c))
 
     # Предварительные вычисления (как в VBA)
-    for ex_name in PRE_EX_MOJIBAKE:
+    for ex_name in params.pre_ex:
         vars_obj.Ex("S_" + VN(_s(ex_name)))
 
     return vars_obj
 
 
-def _calc_for_row(vars_obj, forces: RowForces) -> Tuple[Optional[str], float]:
+def _calc_for_row(vars_obj, forces: RowForces, params: ArmParams) -> Tuple[Optional[str], float]:
     """
     Возвращает (combo_text_or_None, max_result).
     combo_text_or_None == None, если комбинацию не удалось подобрать.
@@ -161,14 +210,16 @@ def _calc_for_row(vars_obj, forces: RowForces) -> Tuple[Optional[str], float]:
     best_combo: Optional[str] = None
     best_result: float = 0.0
 
-    for ix in DIAMETERS:
-        for iy in DIAMETERS:
-            for jx in DIAMETERS:
-                for jy in DIAMETERS:
-                    vars_obj[_s("d__síx")].Value = ix
-                    vars_obj[_s("d__sâx")].Value = jx
-                    vars_obj[_s("d__síy")].Value = iy
-                    vars_obj[_s("d__sây")].Value = jy
+    for ix in params.diameters:
+        for iy in params.diameters:
+            for jx in params.diameters:
+                for jy in params.diameters:
+                    # В VBA: Vars("d__...").Value = ...
+                    # Для полной совместимости прогоняем имя через VN(...)
+                    vars_obj[VN(_s("d__síx"))].Value = ix
+                    vars_obj[VN(_s("d__sâx"))].Value = jx
+                    vars_obj[VN(_s("d__síy"))].Value = iy
+                    vars_obj[VN(_s("d__sây"))].Value = jy
 
                     max_r = 0.0
                     # В VBA делается и NCResult=0 и Vars.Result=0
@@ -177,7 +228,7 @@ def _calc_for_row(vars_obj, forces: RowForces) -> Tuple[Optional[str], float]:
                     except Exception:
                         pass
 
-                    for ex_name in CHECK_EX_MOJIBAKE:
+                    for ex_name in params.check_ex:
                         vars_obj.Ex("S_" + VN(_s(ex_name)))
                         try:
                             r = float(vars_obj.Result)
@@ -247,7 +298,9 @@ def _run_excel(path: str, sheet_name: Optional[str]) -> None:
         # Как в VBA: очистить F:G, начать с A1
         ws.Range("F:G").ClearContents()
 
-        vars_obj = _init_vars()
+        # Параметры берём из глобального значения, проставленного в main()
+        params = _PARAMS
+        vars_obj = _init_vars(params)
 
         row = 0
         while True:
@@ -256,14 +309,20 @@ def _run_excel(path: str, sheet_name: Optional[str]) -> None:
             if cell_text is None or str(cell_text).strip() == "":
                 break
 
-            forces = RowForces(
-                mx=float(ws.Cells(row, 1).Value or 0),
-                my=float(ws.Cells(row, 2).Value or 0),
-                mxy=float(ws.Cells(row, 3).Value or 0),
-                qx=float(ws.Cells(row, 4).Value or 0),
-                qy=float(ws.Cells(row, 5).Value or 0),
-            )
-            combo, nc_result = _calc_for_row(vars_obj, forces)
+            # Поддержка шаблона/файлов с заголовком: если 1-я строка нечисловая — пропускаем.
+            try:
+                forces = RowForces(
+                    mx=float(ws.Cells(row, 1).Value or 0),
+                    my=float(ws.Cells(row, 2).Value or 0),
+                    mxy=float(ws.Cells(row, 3).Value or 0),
+                    qx=float(ws.Cells(row, 4).Value or 0),
+                    qy=float(ws.Cells(row, 5).Value or 0),
+                )
+            except Exception:
+                if row == 1:
+                    continue
+                raise
+            combo, nc_result = _calc_for_row(vars_obj, forces, params)
             if combo is not None:
                 ws.Cells(row, 6).Value = combo
             ws.Cells(row, 7).Value = float(nc_result)
@@ -275,7 +334,8 @@ def _run_excel(path: str, sheet_name: Optional[str]) -> None:
 
 
 def _run_csv(path: str) -> None:
-    vars_obj = _init_vars()
+    params = _PARAMS
+    vars_obj = _init_vars(params)
     rows = _iter_csv_rows(path)
 
     out_path = os.path.splitext(path)[0] + "_out.csv"
@@ -283,26 +343,133 @@ def _run_csv(path: str) -> None:
         w = csv.writer(f)
         w.writerow(["Mx", "My", "Mxy", "Qx", "Qy", "Arm", "NCResult"])
         for forces in rows:
-            combo, nc_result = _calc_for_row(vars_obj, forces)
+            combo, nc_result = _calc_for_row(vars_obj, forces, params)
             w.writerow([forces.mx, forces.my, forces.mxy, forces.qx, forces.qy, combo or "", nc_result])
 
     print(f"Wrote: {out_path}")
 
 
+def _create_excel_template(path: str) -> str:
+    """
+    Создаёт новый Excel-файл-шаблон для ввода усилий (A:E) и вывода (F:G).
+    Файл создаётся только если пользователь не передал --excel/--csv.
+    """
+    import win32com.client
+
+    abspath = os.path.abspath(path)
+    os.makedirs(os.path.dirname(abspath) or ".", exist_ok=True)
+
+    excel = win32com.client.Dispatch("Excel.Application")
+    excel.Visible = False
+    excel.DisplayAlerts = False
+    wb = excel.Workbooks.Add()
+    try:
+        ws = wb.ActiveSheet
+        ws.Name = "Forces"
+
+        # "Чистый" шаблон: только входные колонки A:E.
+        # Колонки F:G будут заполняться скриптом при расчёте.
+        headers = ["M__x", "M__y", "M__xy", "Q__x", "Q__y"]
+        for i, h in enumerate(headers, start=1):
+            ws.Cells(1, i).Value = h
+
+        # Немного косметики (не влияет на функционал)
+        ws.Columns("A:E").AutoFit()
+
+        # Сохраняем
+        # 51 = xlOpenXMLWorkbook (.xlsx)
+        wb.SaveAs(abspath, FileFormat=51)
+    finally:
+        wb.Close(SaveChanges=True)
+        excel.Quit()
+    return abspath
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Порт armirovanie_pliti.vb на Python (NormCAD COM)")
-    ap.add_argument("--excel", help="Путь к .xlsx/.xlsm. Читает A:E, пишет F:G (как VBA).")
+    io = ap.add_mutually_exclusive_group(required=False)
+    io.add_argument("--excel", help="Путь к .xlsx/.xlsm. Читает A:E, пишет F:G (как VBA).")
+    io.add_argument("--csv", help="Путь к CSV (колонки Mx,My,Mxy,Qx,Qy или 5 колонок без заголовка).")
     ap.add_argument("--sheet", help="Имя листа (если не указано — ActiveSheet).")
-    ap.add_argument("--csv", help="Путь к CSV (колонки Mx,My,Mxy,Qx,Qy или 5 колонок без заголовка).")
+    ap.add_argument(
+        "--new-excel",
+        default="armirovanie_pliti_input.xlsx",
+        help="Путь для создания нового Excel-шаблона, если не передан --excel/--csv.",
+    )
+
+    # Все параметры имеют значения по умолчанию (как в VB-скрипте)
+    d = ArmParams()  # только для дефолтов argparse
+    ap.add_argument("--progid", default=d.progid, help="ProgID COM объекта Vars (NormCAD модуль).")
+    ap.add_argument("--gr_g__b1", type=float, default=d.gr_g__b1)
+    ap.add_argument("--m__kp", type=float, default=d.m__kp)
+
+    ap.add_argument("--s_low_x", type=float, default=d.s_low_x)
+    ap.add_argument("--s_up_x", type=float, default=d.s_up_x)
+    ap.add_argument("--s_low_y", type=float, default=d.s_low_y)
+    ap.add_argument("--s_up_y", type=float, default=d.s_up_y)
+    ap.add_argument("--a_low_x", type=float, default=d.a_low_x)
+    ap.add_argument("--a_up_x", type=float, default=d.a_up_x)
+    ap.add_argument("--a_low_y", type=float, default=d.a_low_y)
+    ap.add_argument("--a_up_y", type=float, default=d.a_up_y)
+    ap.add_argument("--h", type=float, default=d.h)
+    ap.add_argument("--b", type=float, default=d.b)
+
+    ap.add_argument(
+        "--diameters",
+        default=",".join(str(int(x)) for x in d.diameters),
+        help="Список диаметров через запятую, например: 10,12,14,16,20",
+    )
+    ap.add_argument(
+        "--pre-ex",
+        default=",".join(d.pre_ex),
+        help="Список предварительных S_ проверок через запятую (как в VB до цикла).",
+    )
+    ap.add_argument(
+        "--check-ex",
+        default=",".join(d.check_ex),
+        help="Список S_ проверок через запятую (как в VB внутри цикла).",
+    )
+    ap.add_argument(
+        "--no-conds",
+        action="store_true",
+        help="Не добавлять условия Conds.Add (использовать условия модуля по умолчанию).",
+    )
     args = ap.parse_args(argv)
 
     if not _is_32bit_python():
         print("ERROR: Требуется 32-bit Python для COM-компонентов NormCAD/NormFEM.", file=sys.stderr)
         return 2
 
+    global _PARAMS
+    _PARAMS = ArmParams(
+        progid=args.progid,
+        gr_g__b1=float(args.gr_g__b1),
+        m__kp=float(args.m__kp),
+        s_low_x=float(args.s_low_x),
+        s_up_x=float(args.s_up_x),
+        s_low_y=float(args.s_low_y),
+        s_up_y=float(args.s_up_y),
+        a_low_x=float(args.a_low_x),
+        a_up_x=float(args.a_up_x),
+        a_low_y=float(args.a_low_y),
+        a_up_y=float(args.a_up_y),
+        h=float(args.h),
+        b=float(args.b),
+        diameters=_parse_csv_floats(args.diameters),
+        pre_ex=_parse_csv_strings(args.pre_ex),
+        check_ex=_parse_csv_strings(args.check_ex),
+        add_conds=(not args.no_conds),
+    )
+
     if not args.excel and not args.csv:
-        ap.print_help()
-        return 2
+        try:
+            out = _create_excel_template(args.new_excel)
+            print(f"Created template: {out}")
+            print("Fill columns A:E (M__x, M__y, M__xy, Q__x, Q__y), then re-run with --excel <file>.")
+            return 0
+        except Exception as e:
+            print(f"ERROR: {e.__class__.__name__}: {e}", file=sys.stderr)
+            return 1
 
     try:
         if args.excel:
@@ -317,4 +484,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# Параметры, собранные в main(). Нужны, чтобы не прокидывать params через все уровни CLI → IO.
+_PARAMS: ArmParams = ArmParams()
 
