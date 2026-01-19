@@ -19,11 +19,9 @@
 from __future__ import annotations
 
 import argparse
-import os
 import struct
 import sys
 from dataclasses import dataclass
-from datetime import datetime
 from typing import List, Optional, Sequence, Tuple
 
 
@@ -137,60 +135,16 @@ def _set(vars_obj, name: str, value: float) -> None:
     vars_obj[VN(_s(name))].Value = value
 
 
-def _make_steps_report_text(params: Params, per_check: List[Tuple[str, float]], nc_result: float) -> str:
-    lines: List[str] = []
-    lines.append("NormCAD calculation trace (ported from self_made_vb_modules/1.vb)")
-    lines.append(f"Timestamp: {datetime.now().isoformat(timespec='seconds')}")
-    lines.append(f"COM ProgID: {params.progid}")
-    lines.append("")
-    lines.append("Inputs (Vars):")
-    lines.append(f"  gr_g__b1 = {params.gr_g__b1}")
-    lines.append(f"  m__kp = {params.m__kp}")
-    lines.append(f"  M__x = {params.M__x}")
-    lines.append(f"  d__síx = {params.d_s_low_x}")
-    lines.append(f"  s__íx = {params.s_low_x}")
-    lines.append(f"  d__sâx = {params.d_s_up_x}")
-    lines.append(f"  s__âx = {params.s_up_x}")
-    lines.append(f"  d__síy = {params.d_s_low_y}")
-    lines.append(f"  s__íy = {params.s_low_y}")
-    lines.append(f"  d__sây = {params.d_s_up_y}")
-    lines.append(f"  s__ây = {params.s_up_y}")
-    lines.append(f"  a__íx = {params.a_low_x}")
-    lines.append(f"  a__âx = {params.a_up_x}")
-    lines.append(f"  k__max = {params.k__max}")
-    lines.append(f"  gr_d_ = {params.gr_d_}")
-    lines.append(f"  M = {params.M}")
-    lines.append(f"  h = {params.h}")
-    lines.append(f"  b = {params.b}")
-    lines.append(f"  a = {params.a}")
-    lines.append(f"  a_vert = {params.a_vert}")
-    lines.append(f"  A__s = {params.A__s}")
-    lines.append(f"  A_vert__s = {params.A_vert__s}")
-    lines.append("")
-    lines.append("Conds.Add used: " + ("YES" if params.add_conds else "NO"))
-    if params.add_conds:
-        lines.append("Conditions:")
-        for c in CONDS_MOJIBAKE:
-            lines.append("  - " + _s(c))
-    lines.append("")
-    lines.append("Checks (Vars.Ex):")
-    for chk, r in per_check:
-        lines.append(f"  S_{chk}: {r}")
-    lines.append("")
-    lines.append(f"NCResult (max): {nc_result}")
-    lines.append("")
-    return "\n".join(lines)
-
-
-def calc_ncresult(params: Params) -> Tuple[float, List[Tuple[str, float]]]:
+def _prepare_vars(params: Params):
     """
-    Полный аналог VB функции NCResult().
-    Возвращает (nc_result, per_check_results)
+    Подготовка COM Vars объекта и (опционально) условий.
+    Возвращает (vars_obj, conds_list) — список строк условий в Unicode,
+    которые реально были переданы в COM (нужно для ncApi.Report.SetConds).
     """
     vars_obj = _dispatch(params.progid)
     conds = vars_obj.Conds
 
-    # Vars(...)
+    # Vars(...) — 1:1 с VB
     _set(vars_obj, "gr_g__b1", params.gr_g__b1)
     _set(vars_obj, "m__kp", params.m__kp)
     _set(vars_obj, "M__x", params.M__x)
@@ -217,9 +171,21 @@ def calc_ncresult(params: Params) -> Tuple[float, List[Tuple[str, float]]]:
     _set(vars_obj, "A_vert__s", params.A_vert__s)
 
     # Conds.Add(...)
+    conds_list: List[str] = []
     if params.add_conds:
         for c in CONDS_MOJIBAKE:
-            conds.Add(_s(c))
+            cc = _s(c)
+            conds.Add(cc)
+            conds_list.append(cc)
+
+    return vars_obj, conds_list
+
+
+def calc_ncresult(params: Params) -> float:
+    """
+    Полный аналог VB функции NCResult(): float
+    """
+    vars_obj, _conds_list = _prepare_vars(params)
 
     # checks
     try:
@@ -228,49 +194,13 @@ def calc_ncresult(params: Params) -> Tuple[float, List[Tuple[str, float]]]:
         pass
 
     nc_result = 0.0
-    per_check: List[Tuple[str, float]] = []
     for chk in params.checks:
         vars_obj.Ex("S_" + VN(_s(chk)))
         try:
-            r = float(vars_obj.Result)
+            nc_result = _max(nc_result, float(vars_obj.Result))
         except Exception:
-            r = 1e9
-        per_check.append((chk, r))
-        nc_result = _max(nc_result, r)
-    return float(nc_result), per_check
-
-
-def _try_make_normcad_report(
-    *,
-    vars_obj,
-    conds_list: List[str],
-    norm: str,
-    task_name: str,
-    unit: str,
-    out_txt: Optional[str],
-    out_doc: Optional[str],
-) -> None:
-    """
-    Попытка сделать официальный отчёт через ncApi.Report (NCAPI.dll), как в NCBkP.pdf.
-    Это доп. к нашему текстовому "trace" и может требовать корректных Norm/Unit.
-    """
-    import win32com.client
-
-    nc = win32com.client.Dispatch("ncApi.Report")
-    nc.Norm = norm
-    nc.TaskName = task_name
-    nc.Unit = unit
-    nc.ClcLoadNorm()
-    nc.SetVars(vars_obj)
-    nc.ClcLoadData()
-    if conds_list:
-        nc.SetConds(conds_list)
-        nc.ClcLoadConds()
-    nc.ClcCalc()
-    if out_txt:
-        nc.MakeReport(out_txt)
-    if out_doc:
-        nc.SendToWord(out_doc)
+            nc_result = _max(nc_result, 1e9)
+    return float(nc_result)
 
 
 def _parse_csv_strings(s: str) -> Tuple[str, ...]:
@@ -281,21 +211,74 @@ def _parse_csv_strings(s: str) -> Tuple[str, ...]:
     return out
 
 
+def _make_normcad_report(
+    *,
+    vars_obj,
+    conds_list: List[str],
+    norm: str,
+    task_name: str,
+    unit: str,
+    out_txt: Optional[str],
+    out_word: Optional[str],
+) -> None:
+    """
+    Официальный отчёт NormCAD через API (строго по wiki_extracted.txt):
+      Norm / TaskName / Unit
+      ClcLoadNorm
+      SetVars
+      SetConds
+      ClcLoadData
+      ClcLoadConds
+      ClcCalc
+      MakeReport / SendToWord
+
+    Важно: никаких "своих" вставок/статистики — только то, что генерирует API.
+    """
+    import win32com.client
+
+    rep = win32com.client.Dispatch("ncApi.Report")
+    rep.Norm = norm
+    rep.TaskName = task_name
+    rep.Unit = unit
+
+    rep.ClcLoadNorm()
+    rep.SetVars(vars_obj)
+
+    if conds_list:
+        try:
+            rep.SetConds(conds_list)
+        except Exception:
+            # Некоторые установки требуют явный SAFEARRAY BSTR
+            import pythoncom
+
+            rep.SetConds(win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_BSTR, conds_list))
+
+    rep.ClcLoadData()
+    if conds_list:
+        rep.ClcLoadConds()
+
+    rep.ClcCalc()
+
+    if out_txt:
+        rep.MakeReport(out_txt)
+    if out_word:
+        rep.SendToWord(out_word)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     d = Params()
-    ap = argparse.ArgumentParser(description="Порт self_made_vb_modules/1.vb → Python (NormCAD COM)")
+    ap = argparse.ArgumentParser(description="Порт self_made_vb_modules/1.vb -> Python (NormCAD COM)")
 
     ap.add_argument("--progid", default=d.progid)
     ap.add_argument("--no-conds", action="store_true", help="Не добавлять Conds.Add (оставить условия модуля по умолчанию).")
     ap.add_argument("--checks", default=",".join(d.checks), help="Список проверок без префикса S_ (через запятую).")
 
-    # Отчёты
-    ap.add_argument("--trace", help="Сохранить пошаговый текстовый лог (наш отчёт) в файл.")
-    ap.add_argument("--nc-report", help="Сохранить официальный отчёт NormCAD (MakeReport) в файл .txt.")
-    ap.add_argument("--word", help="Сохранить официальный отчёт NormCAD в Word (SendToWord) в файл .doc/.docx.")
-    ap.add_argument("--norm", default="", help="NormCAD: ncApi.Report.Norm (например, 'СП 52-103-2007').")
+    # Официальный отчёт NormCAD (только то, что генерирует API)
+    ap.add_argument("--make-report", help="Сохранить официальный отчёт NormCAD в текстовый файл (MakeReport).")
+    ap.add_argument("--send-to-word", help="Сохранить официальный отчёт NormCAD в Word (SendToWord).")
+    ap.add_argument("--norm", default="", help="NormCAD: ncApi.Report.Norm (пример: 'СП 16.13330.2017').")
     ap.add_argument("--task-name", default="self_made_vb_modules/1", help="NormCAD: ncApi.Report.TaskName.")
-    ap.add_argument("--unit", default="", help="NormCAD: ncApi.Report.Unit (например, 'п.2.6, п.2.7').")
+    ap.add_argument("--unit", default="", help="NormCAD: ncApi.Report.Unit (пример: 'п.2.6, п.2.7').")
 
     # Полный набор переменных (дефолты как в VB)
     ap.add_argument("--gr_g__b1", type=float, default=d.gr_g__b1)
@@ -358,84 +341,41 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     try:
-        res, per_check = calc_ncresult(params)
+        # Готовим Vars и список условий (нужно и для расчёта, и для официального отчёта)
+        vars_obj, conds_list = _prepare_vars(params)
+
+        # Расчёт как в VB (Vars.Ex по списку checks)
+        try:
+            vars_obj.Result = 0
+        except Exception:
+            pass
+
+        res = 0.0
+        for chk in params.checks:
+            vars_obj.Ex("S_" + VN(_s(chk)))
+            try:
+                res = _max(res, float(vars_obj.Result))
+            except Exception:
+                res = _max(res, 1e9)
+
+        # Официальный отчёт NormCAD (только API output)
+        if args.make_report or args.send_to_word:
+            if not (args.norm and args.unit):
+                raise ValueError("for NormCAD report you must pass --norm and --unit")
+            _make_normcad_report(
+                vars_obj=vars_obj,
+                conds_list=conds_list,
+                norm=str(args.norm),
+                task_name=str(args.task_name),
+                unit=str(args.unit),
+                out_txt=str(args.make_report) if args.make_report else None,
+                out_word=str(args.send_to_word) if args.send_to_word else None,
+            )
     except Exception as e:
         print(f"ERROR: {e.__class__.__name__}: {e}", file=sys.stderr)
         return 1
 
-    # 1) Всегда печатаем численный итог (видно в терминале/PowerShell)
     print(res)
-
-    # 2) Наш пошаговый отчёт (всегда доступен)
-    if args.trace:
-        trace_path = os.path.abspath(args.trace)
-        os.makedirs(os.path.dirname(trace_path) or ".", exist_ok=True)
-        txt = _make_steps_report_text(params, per_check, res)
-        with open(trace_path, "w", encoding="utf-8") as f:
-            f.write(txt)
-        print(f"TRACE_WRITTEN: {trace_path}", file=sys.stderr)
-
-    # 3) Официальный отчёт NormCAD (если попросили)
-    if args.nc_report or args.word:
-        # Для ncApi.Report нам нужен сам vars_obj, поэтому создадим ещё раз и передадим.
-        # (win32com объект не сериализуется между вызовами, проще повторить установку)
-        vars_obj = _dispatch(params.progid)
-        conds_obj = vars_obj.Conds
-
-        # Vars(...) повторно
-        _set(vars_obj, "gr_g__b1", params.gr_g__b1)
-        _set(vars_obj, "m__kp", params.m__kp)
-        _set(vars_obj, "M__x", params.M__x)
-        _set(vars_obj, "d__síx", params.d_s_low_x)
-        _set(vars_obj, "s__íx", params.s_low_x)
-        _set(vars_obj, "d__sâx", params.d_s_up_x)
-        _set(vars_obj, "s__âx", params.s_up_x)
-        _set(vars_obj, "d__síy", params.d_s_low_y)
-        _set(vars_obj, "s__íy", params.s_low_y)
-        _set(vars_obj, "d__sây", params.d_s_up_y)
-        _set(vars_obj, "s__ây", params.s_up_y)
-        _set(vars_obj, "a__íx", params.a_low_x)
-        _set(vars_obj, "a__âx", params.a_up_x)
-        _set(vars_obj, "k__max", params.k__max)
-        _set(vars_obj, "gr_d_", params.gr_d_)
-        _set(vars_obj, "M", params.M)
-        _set(vars_obj, "h", params.h)
-        _set(vars_obj, "b", params.b)
-        _set(vars_obj, "a", params.a)
-        _set(vars_obj, "a_vert", params.a_vert)
-        _set(vars_obj, "A__s", params.A__s)
-        _set(vars_obj, "A_vert__s", params.A_vert__s)
-
-        conds_list: List[str] = []
-        if params.add_conds:
-            for c in CONDS_MOJIBAKE:
-                cc = _s(c)
-                conds_obj.Add(cc)
-                conds_list.append(cc)
-
-        out_txt = os.path.abspath(args.nc_report) if args.nc_report else None
-        out_doc = os.path.abspath(args.word) if args.word else None
-        if out_txt:
-            os.makedirs(os.path.dirname(out_txt) or ".", exist_ok=True)
-        if out_doc:
-            os.makedirs(os.path.dirname(out_doc) or ".", exist_ok=True)
-
-        try:
-            _try_make_normcad_report(
-                vars_obj=vars_obj,
-                conds_list=conds_list,
-                norm=str(args.norm or ""),
-                task_name=str(args.task_name or ""),
-                unit=str(args.unit or ""),
-                out_txt=out_txt,
-                out_doc=out_doc,
-            )
-            if out_txt:
-                print(f"NC_REPORT_WRITTEN: {out_txt}", file=sys.stderr)
-            if out_doc:
-                print(f"WORD_WRITTEN: {out_doc}", file=sys.stderr)
-        except Exception as e:
-            print(f"NC_REPORT_ERROR: {e.__class__.__name__}: {e}", file=sys.stderr)
     return 0
 
 
