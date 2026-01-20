@@ -46,7 +46,10 @@ def main() -> int:
     # - Unit: List of calculation sections (empty = all)
     norm_val = "EN 1991-1-3___Снеговые нагрузки"
     task_val = "Определение нагрузки от нависания снега на краю ската покрытия"
-    unit_val = ""  # Empty = full report
+    # Unit specifies which calculation sections to run
+    # From your .nr1 file: Unit=п.п. прил. C;6.3
+    # Empty string may mean "no sections", not "all sections"
+    unit_val = "п.п. прил. C;6.3"  # Specific sections from .nr1 file
     
     # In pywin32, COM properties without type library may appear as methods.
     # Try calling them as methods (VB property setters become method calls)
